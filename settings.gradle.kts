@@ -4,11 +4,14 @@ pluginManagement {
         google()
         mavenCentral()
     }
+    plugins {
+        // Provide plugin versions for the plugins used in build scripts
+        id("com.android.application") version "8.1.0"
+        id("org.jetbrains.kotlin.android") version "1.9.10"
+    }
 }
 
 dependencyResolutionManagement {
-    // Use the named RepositoriesMode to avoid unresolved reference issues in some IDE setups
-    repositoriesMode.set(org.gradle.api.initialization.repositories.RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
         google()
         mavenCentral()
