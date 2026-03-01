@@ -5,8 +5,8 @@ import android.graphics.Bitmap
 /**
  * Yildiz Tespiti - OpenCV olmadan
  *
- * Bitmap piksellerinden parlak noktalari bulur ve kucuk bolgeleri
- * yildiz adayi olarak dondurur.
+ * Yerel tepe + yerel arka plan farki (prominence) ile
+ * dusuk isikta yildiz adayi bulur.
  */
 data class Star(
     val x: Float,
@@ -19,94 +19,107 @@ class StarDetector {
     fun detectStars(bitmap: Bitmap): List<Star> {
         val width = bitmap.width
         val height = bitmap.height
-        if (width <= 0 || height <= 0) return emptyList()
+        if (width < 8 || height < 8) return emptyList()
 
         val pixels = IntArray(width * height)
         bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
 
         val gray = IntArray(width * height)
-        var sum = 0.0
         for (i in pixels.indices) {
-            val g = grayOf(pixels[i])
-            gray[i] = g
-            sum += g
+            gray[i] = grayOf(pixels[i])
         }
-        val mean = sum / gray.size
 
-        var varSum = 0.0
-        for (g in gray) {
-            val d = g - mean
-            varSum += d * d
+        // Summed-area table for fast local mean.
+        val integral = LongArray((width + 1) * (height + 1))
+        for (y in 1..height) {
+            var rowSum = 0L
+            for (x in 1..width) {
+                rowSum += gray[(y - 1) * width + (x - 1)]
+                integral[y * (width + 1) + x] = integral[(y - 1) * (width + 1) + x] + rowSum
+            }
         }
-        val stdDev = kotlin.math.sqrt(varSum / gray.size)
 
-        val thresholdHigh = ((mean + (1.1 * stdDev)).toInt()).coerceIn(120, 235)
-        val thresholdLow = (thresholdHigh - 25).coerceAtLeast(90)
+        val rawCandidates = mutableListOf<Star>()
+        val minLuma = 45
+        val minProminence = 12.0
+        val backgroundRadius = 4 // 9x9 window
 
-        val visited = BooleanArray(width * height)
-        val stars = mutableListOf<Star>()
-        val minArea = 1
-        val maxArea = 64
-
-        for (y in 0 until height) {
-            for (x in 0 until width) {
+        for (y in backgroundRadius until (height - backgroundRadius)) {
+            for (x in backgroundRadius until (width - backgroundRadius)) {
                 val idx = y * width + x
-                if (visited[idx]) continue
+                val luma = gray[idx]
+                if (luma < minLuma) continue
+                if (!isLocalPeak(gray, width, x, y, luma)) continue
 
-                val seedBrightness = gray[idx]
-                if (seedBrightness < thresholdHigh) continue
-                if (!isLocalPeak(gray, width, height, x, y, seedBrightness)) continue
+                val x0 = x - backgroundRadius
+                val y0 = y - backgroundRadius
+                val x1 = x + backgroundRadius
+                val y1 = y + backgroundRadius
+                val area = (x1 - x0 + 1) * (y1 - y0 + 1)
+                val localMean = sumRect(integral, width, x0, y0, x1, y1).toDouble() / area
+                val prominence = luma - localMean
 
-                val queue = ArrayDeque<Int>()
-                queue.addLast(idx)
-                visited[idx] = true
-
-                var area = 0
-                var sumX = 0f
-                var sumY = 0f
-                var sumBrightness = 0f
-                var maxBrightness = 0
-
-                while (queue.isNotEmpty()) {
-                    val current = queue.removeFirst()
-                    val cx = current % width
-                    val cy = current / width
-                    val cGray = gray[current]
-
-                    if (cGray < thresholdLow) continue
-
-                    area++
-                    sumX += cx
-                    sumY += cy
-                    sumBrightness += cGray
-                    if (cGray > maxBrightness) maxBrightness = cGray
-
-                    val x0 = maxOf(0, cx - 1)
-                    val x1 = minOf(width - 1, cx + 1)
-                    val y0 = maxOf(0, cy - 1)
-                    val y1 = minOf(height - 1, cy + 1)
-
-                    for (ny in y0..y1) {
-                        for (nx in x0..x1) {
-                            val nIdx = ny * width + nx
-                            if (!visited[nIdx]) {
-                                visited[nIdx] = true
-                                queue.addLast(nIdx)
-                            }
-                        }
-                    }
-                }
-
-                if (area in minArea..maxArea && maxBrightness >= thresholdHigh) {
-                    val centerX = sumX / area
-                    val centerY = sumY / area
-                    val brightness = sumBrightness / area
-                    stars.add(Star(centerX, centerY, brightness))
+                if (prominence >= minProminence) {
+                    rawCandidates.add(Star(x.toFloat(), y.toFloat(), luma.toFloat()))
                 }
             }
         }
 
-        return stars
+        // Non-maximum suppression: keep brightest star in a small radius.
+        val sorted = rawCandidates.sortedByDescending { it.brightness }
+        val filtered = mutableListOf<Star>()
+        val radius = 4f
+        val radiusSq = radius * radius
+
+        for (candidate in sorted) {
+            var tooClose = false
+            for (kept in filtered) {
+                val dx = candidate.x - kept.x
+                val dy = candidate.y - kept.y
+                if (dx * dx + dy * dy <= radiusSq) {
+                    tooClose = true
+                    break
+                }
+            }
+            if (!tooClose) {
+                filtered.add(candidate)
+                if (filtered.size >= 400) break
+            }
+        }
+
+        return filtered
+    }
+
+    private fun sumRect(
+        integral: LongArray,
+        width: Int,
+        x0: Int,
+        y0: Int,
+        x1: Int,
+        y1: Int
+    ): Long {
+        val w = width + 1
+        val xa = x0
+        val ya = y0
+        val xb = x1 + 1
+        val yb = y1 + 1
+        return integral[yb * w + xb] - integral[ya * w + xb] - integral[yb * w + xa] + integral[ya * w + xa]
+    }
+
+    private fun isLocalPeak(
+        gray: IntArray,
+        width: Int,
+        x: Int,
+        y: Int,
+        value: Int
+    ): Boolean {
+        for (ny in (y - 1)..(y + 1)) {
+            for (nx in (x - 1)..(x + 1)) {
+                if (nx == x && ny == y) continue
+                if (gray[ny * width + nx] > value) return false
+            }
+        }
+        return true
     }
 
     fun getBrightestStars(stars: List<Star>, count: Int): List<Star> {
@@ -122,27 +135,5 @@ class StarDetector {
         val g = (pixel shr 8) and 0xFF
         val b = pixel and 0xFF
         return (0.299 * r + 0.587 * g + 0.114 * b).toInt()
-    }
-
-    private fun isLocalPeak(
-        gray: IntArray,
-        width: Int,
-        height: Int,
-        x: Int,
-        y: Int,
-        value: Int
-    ): Boolean {
-        val x0 = maxOf(0, x - 1)
-        val x1 = minOf(width - 1, x + 1)
-        val y0 = maxOf(0, y - 1)
-        val y1 = minOf(height - 1, y + 1)
-
-        for (ny in y0..y1) {
-            for (nx in x0..x1) {
-                if (nx == x && ny == y) continue
-                if (gray[ny * width + nx] > value) return false
-            }
-        }
-        return true
     }
 }
