@@ -63,7 +63,7 @@ class LatitudeSolver {
     }
     
     private fun round(value: Float, decimals: Int): Float {
-        val multiplier = kotlin.math.pow(10f, decimals.toFloat()).toInt()
-        return (value * multiplier).toInt() / multiplier.toFloat()
+        val multiplier = Math.pow(10.0, decimals.toDouble()).toFloat()
+        return (value * multiplier).toInt() / multiplier
     }
 }

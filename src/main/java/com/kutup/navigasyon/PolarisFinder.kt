@@ -1,7 +1,6 @@
 package com.kutup.navigasyon
 
 import kotlin.math.hypot
-import kotlin.math.sqrt
 
 /**
  * Polaris Bulma - Akıllı Algoritma
@@ -63,10 +62,10 @@ class PolarisFinder {
     
     private fun calculateIsolationScore(star: Star, allStars: List<Star>, imageHeight: Int): Float {
         // En yakın 5 komşunun ortalama mesafesi
-        val distances = allStars
+        val distances: List<Double> = allStars
             .filter { it != star }
             .map { other ->
-                hypot(star.x - other.x, star.y - other.y)
+                hypot((star.x - other.x).toDouble(), (star.y - other.y).toDouble())
             }
             .sorted()
         
@@ -77,8 +76,8 @@ class PolarisFinder {
         }
         
         // Normalize et
-        val maxPossibleDistance = hypot(imageHeight.toFloat(), imageHeight.toFloat())
-        var isolationScore = avgDistance / maxPossibleDistance
+        val maxPossibleDistance = hypot(imageHeight.toDouble(), imageHeight.toDouble())
+        var isolationScore = (avgDistance / maxPossibleDistance).toFloat()
         isolationScore = isolationScore.coerceIn(0f, 1f)
         
         return isolationScore
