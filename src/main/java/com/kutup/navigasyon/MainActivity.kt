@@ -4,6 +4,8 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.location.Location
+import android.location.LocationManager
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
@@ -24,6 +26,7 @@ import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import java.io.InputStream
+import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -35,6 +38,21 @@ class MainActivity : AppCompatActivity() {
         private val REQUIRED_PERMISSIONS = arrayOf(
             Manifest.permission.CAMERA,
             Manifest.permission.ACCESS_FINE_LOCATION
+        )
+
+        private data class PolarStation(
+            val name: String,
+            val latitude: Double,
+            val longitude: Double
+        )
+
+        // Kutup bolgesindeki bilinen iletisim noktalarinin yaklasik koordinatlari.
+        private val POLAR_STATIONS = listOf(
+            PolarStation("Longyearbyen (Svalbard)", 78.2232, 15.6469),
+            PolarStation("Ny-Alesund (Svalbard)", 78.9236, 11.9233),
+            PolarStation("Utqiagvik (Alaska)", 71.2906, -156.7886),
+            PolarStation("Tiksi (Saha)", 71.6366, 128.8718),
+            PolarStation("Alert (Nunavut)", 82.5018, -62.3481)
         )
     }
 
@@ -50,6 +68,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var polarisFinder: PolarisFinder
     private lateinit var latitudeSolver: LatitudeSolver
 
+    private lateinit var locationManager: LocationManager
     private lateinit var cameraExecutor: ExecutorService
     private var camera: Camera? = null
     private var imageCapture: ImageCapture? = null
@@ -89,9 +108,11 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         initializeUI()
+        locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
 
         if (allPermissionsGranted()) {
             startCamera()
+            updateLocationAndStationInfo()
         } else {
             ActivityCompat.requestPermissions(this, REQUIRED_PERMISSIONS, REQUEST_CODE_PERMISSIONS)
         }
@@ -145,6 +166,7 @@ class MainActivity : AppCompatActivity() {
         if (requestCode == REQUEST_CODE_PERMISSIONS) {
             if (allPermissionsGranted()) {
                 startCamera()
+                updateLocationAndStationInfo()
             } else {
                 Toast.makeText(this, "Izinler reddedildi", Toast.LENGTH_SHORT).show()
                 finish()
@@ -317,6 +339,98 @@ class MainActivity : AppCompatActivity() {
     private fun setProcessingState(isProcessing: Boolean) {
         captureButton.isEnabled = !isProcessing && imageCapture != null
         galleryButton.isEnabled = !isProcessing
+    }
+
+    private fun updateLocationAndStationInfo() {
+        if (!allPermissionsGranted()) {
+            azimutuResultTextView.text = "Konum izni yok"
+            return
+        }
+
+        val userLocation = findBestLastKnownLocation()
+        if (userLocation == null) {
+            azimutuResultTextView.text = "Konum alinamadi (GPS acik olmali)"
+            return
+        }
+
+        var nearest: PolarStation? = null
+        var nearestDistanceMeters = Float.MAX_VALUE
+        var nearestBearing = 0f
+
+        for (station in POLAR_STATIONS) {
+            val results = FloatArray(3)
+            Location.distanceBetween(
+                userLocation.latitude,
+                userLocation.longitude,
+                station.latitude,
+                station.longitude,
+                results
+            )
+
+            if (results[0] < nearestDistanceMeters) {
+                nearest = station
+                nearestDistanceMeters = results[0]
+                nearestBearing = results[1]
+            }
+        }
+
+        if (nearest == null) {
+            azimutuResultTextView.text = "Istasyon verisi bulunamadi"
+            return
+        }
+
+        val bearing360 = normalizeBearing(nearestBearing)
+        val directionText = bearingToDirection(bearing360)
+        val distanceKm = nearestDistanceMeters / 1000f
+
+        azimutuResultTextView.text = """
+            Konumunuz:
+            ${formatCoord(userLocation.latitude, userLocation.longitude)}
+
+            En yakin kutup istasyonu:
+            ${nearest.name}
+            ${formatCoord(nearest.latitude, nearest.longitude)}
+
+            Uzaklik: ${String.format(Locale.US, "%.1f", distanceKm)} km
+            Yon: ${String.format(Locale.US, "%.0f", bearing360)}° ($directionText)
+        """.trimIndent()
+    }
+
+    private fun findBestLastKnownLocation(): Location? {
+        val providers = listOf(
+            LocationManager.GPS_PROVIDER,
+            LocationManager.NETWORK_PROVIDER,
+            LocationManager.PASSIVE_PROVIDER
+        )
+
+        var best: Location? = null
+        for (provider in providers) {
+            try {
+                val loc = locationManager.getLastKnownLocation(provider) ?: continue
+                if (best == null || loc.accuracy < best!!.accuracy) {
+                    best = loc
+                }
+            } catch (_: SecurityException) {
+            } catch (_: Exception) {
+            }
+        }
+        return best
+    }
+
+    private fun normalizeBearing(bearing: Float): Float {
+        var b = bearing % 360f
+        if (b < 0f) b += 360f
+        return b
+    }
+
+    private fun bearingToDirection(bearing: Float): String {
+        val dirs = listOf("Kuzey", "Kuzeydogu", "Dogu", "Guneydogu", "Guney", "Guneybati", "Bati", "Kuzeybati")
+        val idx = (((bearing + 22.5f) / 45f).toInt()) % 8
+        return dirs[idx]
+    }
+
+    private fun formatCoord(lat: Double, lon: Double): String {
+        return String.format(Locale.US, "%.5f, %.5f", lat, lon)
     }
 
     private fun updateCompassDisplay(azimuth: Float) {
