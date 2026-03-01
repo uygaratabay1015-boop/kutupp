@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.os.Bundle
 import android.util.Log
+import android.util.Size
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
@@ -124,6 +125,7 @@ class MainActivity : AppCompatActivity() {
 
             imageCapture = ImageCapture.Builder()
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                .setTargetResolution(Size(1280, 720))
                 .build()
 
             val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
@@ -203,26 +205,33 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun imageToBitmap(image: ImageProxy): Bitmap {
-        val planes = image.planes
-        val ySize = planes[0].buffer.remaining()
-        val uSize = planes[1].buffer.remaining()
-        val vSize = planes[2].buffer.remaining()
+        val yPlane = image.planes[0]
+        val yBuffer = yPlane.buffer
+        val yRowStride = yPlane.rowStride
+        val yPixelStride = yPlane.pixelStride
 
-        val nv21 = ByteArray(ySize + uSize + vSize)
-        planes[0].buffer.get(nv21, 0, ySize)
-        planes[1].buffer.get(nv21, ySize, uSize)
-        planes[2].buffer.get(nv21, ySize + uSize, vSize)
+        val srcWidth = image.width
+        val srcHeight = image.height
 
-        val bitmap = Bitmap.createBitmap(image.width, image.height, Bitmap.Config.ARGB_8888)
-        val pixels = IntArray(image.width * image.height)
+        // Process at lower resolution to avoid heavy memory/CPU usage.
+        val maxDim = 960
+        val scale = maxOf(1, maxOf(srcWidth, srcHeight) / maxDim)
+        val outWidth = srcWidth / scale
+        val outHeight = srcHeight / scale
 
-        for (i in pixels.indices) {
-            val y = (nv21[i].toInt() and 0xFF)
-            pixels[i] = (0xFF shl 24) or (y shl 16) or (y shl 8) or y
+        val pixels = IntArray(outWidth * outHeight)
+
+        for (y in 0 until outHeight) {
+            val srcY = y * scale
+            for (x in 0 until outWidth) {
+                val srcX = x * scale
+                val yIndex = srcY * yRowStride + srcX * yPixelStride
+                val luma = yBuffer.get(yIndex).toInt() and 0xFF
+                pixels[y * outWidth + x] = (0xFF shl 24) or (luma shl 16) or (luma shl 8) or luma
+            }
         }
 
-        bitmap.setPixels(pixels, 0, image.width, 0, 0, image.width, image.height)
-        return bitmap
+        return Bitmap.createBitmap(pixels, outWidth, outHeight, Bitmap.Config.ARGB_8888)
     }
 
     private fun updateCompassDisplay(azimuth: Float) {
