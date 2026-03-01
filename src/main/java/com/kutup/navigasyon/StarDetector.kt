@@ -1,7 +1,6 @@
 package com.kutup.navigasyon
 
 import android.graphics.Bitmap
-import kotlin.math.hypot
 
 /**
  * Yildiz Tespiti - OpenCV olmadan
@@ -25,20 +24,38 @@ class StarDetector {
         val pixels = IntArray(width * height)
         bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
 
+        val gray = IntArray(width * height)
+        var sum = 0.0
+        for (i in pixels.indices) {
+            val g = grayOf(pixels[i])
+            gray[i] = g
+            sum += g
+        }
+        val mean = sum / gray.size
+
+        var varSum = 0.0
+        for (g in gray) {
+            val d = g - mean
+            varSum += d * d
+        }
+        val stdDev = kotlin.math.sqrt(varSum / gray.size)
+
+        val thresholdHigh = ((mean + (1.1 * stdDev)).toInt()).coerceIn(120, 235)
+        val thresholdLow = (thresholdHigh - 25).coerceAtLeast(90)
+
         val visited = BooleanArray(width * height)
         val stars = mutableListOf<Star>()
-
-        val threshold = 180
-        val minArea = 3
-        val maxArea = 200
+        val minArea = 1
+        val maxArea = 64
 
         for (y in 0 until height) {
             for (x in 0 until width) {
                 val idx = y * width + x
                 if (visited[idx]) continue
 
-                val gray = grayOf(pixels[idx])
-                if (gray < threshold) continue
+                val seedBrightness = gray[idx]
+                if (seedBrightness < thresholdHigh) continue
+                if (!isLocalPeak(gray, width, height, x, y, seedBrightness)) continue
 
                 val queue = ArrayDeque<Int>()
                 queue.addLast(idx)
@@ -48,19 +65,21 @@ class StarDetector {
                 var sumX = 0f
                 var sumY = 0f
                 var sumBrightness = 0f
+                var maxBrightness = 0
 
                 while (queue.isNotEmpty()) {
                     val current = queue.removeFirst()
                     val cx = current % width
                     val cy = current / width
-                    val cGray = grayOf(pixels[current])
+                    val cGray = gray[current]
 
-                    if (cGray < threshold) continue
+                    if (cGray < thresholdLow) continue
 
                     area++
                     sumX += cx
                     sumY += cy
                     sumBrightness += cGray
+                    if (cGray > maxBrightness) maxBrightness = cGray
 
                     val x0 = maxOf(0, cx - 1)
                     val x1 = minOf(width - 1, cx + 1)
@@ -78,7 +97,7 @@ class StarDetector {
                     }
                 }
 
-                if (area in minArea..maxArea) {
+                if (area in minArea..maxArea && maxBrightness >= thresholdHigh) {
                     val centerX = sumX / area
                     val centerY = sumY / area
                     val brightness = sumBrightness / area
@@ -103,5 +122,27 @@ class StarDetector {
         val g = (pixel shr 8) and 0xFF
         val b = pixel and 0xFF
         return (0.299 * r + 0.587 * g + 0.114 * b).toInt()
+    }
+
+    private fun isLocalPeak(
+        gray: IntArray,
+        width: Int,
+        height: Int,
+        x: Int,
+        y: Int,
+        value: Int
+    ): Boolean {
+        val x0 = maxOf(0, x - 1)
+        val x1 = minOf(width - 1, x + 1)
+        val y0 = maxOf(0, y - 1)
+        val y1 = minOf(height - 1, y + 1)
+
+        for (ny in y0..y1) {
+            for (nx in x0..x1) {
+                if (nx == x && ny == y) continue
+                if (gray[ny * width + nx] > value) return false
+            }
+        }
+        return true
     }
 }
