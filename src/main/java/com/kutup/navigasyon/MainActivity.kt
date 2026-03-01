@@ -3,12 +3,15 @@ package com.kutup.navigasyon
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import android.util.Size
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
@@ -20,6 +23,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import java.io.InputStream
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -36,6 +40,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var previewView: PreviewView
     private lateinit var captureButton: Button
+    private lateinit var galleryButton: Button
     private lateinit var compassStatusTextView: TextView
     private lateinit var azimutuResultTextView: TextView
     private lateinit var latitudeResultTextView: TextView
@@ -50,6 +55,34 @@ class MainActivity : AppCompatActivity() {
     private var imageCapture: ImageCapture? = null
 
     private val verticalFov = 60f
+
+    private val pickImageLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+        if (uri == null) {
+            Toast.makeText(this, "Gorsel secilmedi", Toast.LENGTH_SHORT).show()
+            return@registerForActivityResult
+        }
+
+        setProcessingState(true)
+        cameraExecutor.execute {
+            try {
+                val bitmap = decodeBitmapFromUri(uri)
+                if (bitmap == null) {
+                    runOnUiThread {
+                        Toast.makeText(this, "Gorsel okunamadi", Toast.LENGTH_SHORT).show()
+                        setProcessingState(false)
+                    }
+                    return@execute
+                }
+                processBitmap(bitmap)
+            } catch (e: Exception) {
+                Log.e(TAG, "Galeri isleme hatasi", e)
+                runOnUiThread {
+                    Toast.makeText(this, "Galeri fotografi islenemedi", Toast.LENGTH_SHORT).show()
+                    setProcessingState(false)
+                }
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -70,12 +103,14 @@ class MainActivity : AppCompatActivity() {
     private fun initializeUI() {
         previewView = findViewById(R.id.previewView)
         captureButton = findViewById(R.id.captureButton)
+        galleryButton = findViewById(R.id.galleryButton)
         compassStatusTextView = findViewById(R.id.compassStatus)
         azimutuResultTextView = findViewById(R.id.azimutuResult)
         latitudeResultTextView = findViewById(R.id.latitudeResult)
 
         captureButton.isEnabled = false
         captureButton.setOnClickListener { takePhoto() }
+        galleryButton.setOnClickListener { openGallery() }
 
         cameraExecutor = Executors.newSingleThreadExecutor()
     }
@@ -89,6 +124,10 @@ class MainActivity : AppCompatActivity() {
         compass.onAzimuthChanged = { azimuth ->
             updateCompassDisplay(azimuth)
         }
+    }
+
+    private fun openGallery() {
+        pickImageLauncher.launch("image/*")
     }
 
     private fun allPermissionsGranted(): Boolean {
@@ -149,7 +188,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        captureButton.isEnabled = false
+        setProcessingState(true)
 
         localImageCapture.takePicture(
             ContextCompat.getMainExecutor(this),
@@ -160,7 +199,7 @@ class MainActivity : AppCompatActivity() {
 
                 override fun onError(exc: ImageCaptureException) {
                     Log.e(TAG, "Fotograf cekme hatasi", exc)
-                    captureButton.isEnabled = true
+                    setProcessingState(false)
                     Toast.makeText(this@MainActivity, "Fotograf cekilemedi", Toast.LENGTH_SHORT).show()
                 }
             }
@@ -171,35 +210,47 @@ class MainActivity : AppCompatActivity() {
         cameraExecutor.execute {
             try {
                 val bitmap = imageToBitmap(image)
-                val stars = starDetector.detectStars(bitmap)
-
-                if (stars.isEmpty()) {
-                    runOnUiThread {
-                        Toast.makeText(this, "Yildiz tespit edilemedi", Toast.LENGTH_SHORT).show()
-                        captureButton.isEnabled = true
-                    }
-                    return@execute
-                }
-
-                val (polaris, _) = polarisFinder.findPolaris(stars, bitmap.height, bitmap.width)
-                val latitudeResult = latitudeSolver.calculateLatitude(
-                    polaris.y,
-                    bitmap.height,
-                    verticalFov
-                )
-
-                runOnUiThread {
-                    displayResults(polaris, latitudeResult)
-                    captureButton.isEnabled = true
-                }
+                processBitmap(bitmap)
             } catch (e: Exception) {
                 Log.e(TAG, "Isleme hatasi", e)
                 runOnUiThread {
-                    captureButton.isEnabled = true
+                    setProcessingState(false)
                     Toast.makeText(this, "Fotograf islenemedi", Toast.LENGTH_SHORT).show()
                 }
             } finally {
                 image.close()
+            }
+        }
+    }
+
+    private fun processBitmap(bitmap: Bitmap) {
+        try {
+            val stars = starDetector.detectStars(bitmap)
+
+            if (stars.isEmpty()) {
+                runOnUiThread {
+                    Toast.makeText(this, "Yildiz tespit edilemedi", Toast.LENGTH_SHORT).show()
+                    setProcessingState(false)
+                }
+                return
+            }
+
+            val (polaris, _) = polarisFinder.findPolaris(stars, bitmap.height, bitmap.width)
+            val latitudeResult = latitudeSolver.calculateLatitude(
+                polaris.y,
+                bitmap.height,
+                verticalFov
+            )
+
+            runOnUiThread {
+                displayResults(polaris, latitudeResult)
+                setProcessingState(false)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Bitmap isleme hatasi", e)
+            runOnUiThread {
+                setProcessingState(false)
+                Toast.makeText(this, "Fotograf islenemedi", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -213,7 +264,6 @@ class MainActivity : AppCompatActivity() {
         val srcWidth = image.width
         val srcHeight = image.height
 
-        // Process at lower resolution to avoid heavy memory/CPU usage.
         val maxDim = 960
         val scale = maxOf(1, maxOf(srcWidth, srcHeight) / maxDim)
         val outWidth = srcWidth / scale
@@ -232,6 +282,41 @@ class MainActivity : AppCompatActivity() {
         }
 
         return Bitmap.createBitmap(pixels, outWidth, outHeight, Bitmap.Config.ARGB_8888)
+    }
+
+    private fun decodeBitmapFromUri(uri: Uri): Bitmap? {
+        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        contentResolver.openInputStream(uri).use { input ->
+            if (input == null) return null
+            BitmapFactory.decodeStream(input, null, opts)
+        }
+
+        if (opts.outWidth <= 0 || opts.outHeight <= 0) return null
+
+        val maxDim = 1600
+        var sampleSize = 1
+        var w = opts.outWidth
+        var h = opts.outHeight
+        while (w > maxDim || h > maxDim) {
+            w /= 2
+            h /= 2
+            sampleSize *= 2
+        }
+
+        val decodeOpts = BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+
+        contentResolver.openInputStream(uri).use { input: InputStream? ->
+            if (input == null) return null
+            return BitmapFactory.decodeStream(input, null, decodeOpts)
+        }
+    }
+
+    private fun setProcessingState(isProcessing: Boolean) {
+        captureButton.isEnabled = !isProcessing && imageCapture != null
+        galleryButton.isEnabled = !isProcessing
     }
 
     private fun updateCompassDisplay(azimuth: Float) {
