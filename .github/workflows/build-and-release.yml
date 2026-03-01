@@ -1,11 +1,17 @@
-name: Build Debug APK and Release
+name: Build and Publish APK
 
 on:
+  push:
+    branches: [ main, master ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -16,42 +22,30 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Install Android SDK
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y unzip wget
-          mkdir -p $HOME/android-sdk/cmdline-tools
-          wget https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip -O cmdline-tools.zip
-          unzip cmdline-tools.zip -d $HOME/android-sdk/cmdline-tools
-          # ensure commandline-tools are in a 'latest' folder expected by sdkmanager
-          if [ -d "$HOME/android-sdk/cmdline-tools/cmdline-tools" ]; then
-            mv $HOME/android-sdk/cmdline-tools/cmdline-tools $HOME/android-sdk/cmdline-tools/latest
-          fi
-          export ANDROID_SDK_ROOT=$HOME/android-sdk
-          yes | $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_SDK_ROOT "platform-tools" "platforms;android-34" "build-tools;34.0.0"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
-          echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
-
       - name: Build debug APK
-        run: ./gradlew assembleDebug --stacktrace --info --no-daemon
+        run: ./gradlew assembleDebug --no-daemon
 
-      - name: Create GitHub Release
-        id: create_release
-        uses: actions/create-release@v1
-        with:
-          tag_name: v1.0
-          release_name: v1.0
-          body: Automated debug release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Collect APK
+        run: |
+          mkdir -p dist
+          APK_PATH=$(find . -type f -name "*debug*.apk" | head -n 1)
+          cp "$APK_PATH" dist/kutup-navigasyon-debug.apk
 
-      - name: Upload APK to release
-        uses: actions/upload-release-asset@v1
+      - name: Publish latest release
+        uses: ncipollo/release-action@v1
         with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: app/build/outputs/apk/debug/app-debug.apk
-          asset_name: app-debug.apk
-          asset_content_type: application/vnd.android.package-archive
+          tag: apk-latest
+          name: KutuP Navigasyon APK (Latest)
+          body: |
+            Otomatik olusturulan debug APK.
+            Tarih: ${{ github.run_id }}
+          allowUpdates: true
+          artifactErrorsFailBuild: true
+          replacesArtifacts: true
+          artifacts: dist/kutup-navigasyon-debug.apk

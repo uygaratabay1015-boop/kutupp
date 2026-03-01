@@ -235,3 +235,7 @@ Sorun yaşarsanız:
 
 **Yapıldı**: Kutup Yarışması
 **Hedef**: GPS olmadan yıldızlarla konum bulma
+
+## APK Download
+- See APK_DOWNLOAD.md for direct release link format.
+
