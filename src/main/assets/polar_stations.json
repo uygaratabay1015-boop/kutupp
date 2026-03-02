@@ -1,0 +1,50 @@
+﻿[
+  {
+    "name": "Longyearbyen",
+    "latitude": 78.2232,
+    "longitude": 15.6469,
+    "source": "Norwegian Polar Institute"
+  },
+  {
+    "name": "Ny-Alesund",
+    "latitude": 78.9236,
+    "longitude": 11.9233,
+    "source": "Kings Bay AS"
+  },
+  {
+    "name": "Utqiagvik",
+    "latitude": 71.2906,
+    "longitude": -156.7886,
+    "source": "USGS / NOAA"
+  },
+  {
+    "name": "Tiksi",
+    "latitude": 71.6366,
+    "longitude": 128.8718,
+    "source": "Arctic and Antarctic Research Institute"
+  },
+  {
+    "name": "Alert",
+    "latitude": 82.5018,
+    "longitude": -62.3481,
+    "source": "Canadian Forces Station"
+  },
+  {
+    "name": "McMurdo",
+    "latitude": -77.8419,
+    "longitude": 166.6863,
+    "source": "USAP"
+  },
+  {
+    "name": "Rothera",
+    "latitude": -67.5681,
+    "longitude": -68.1236,
+    "source": "British Antarctic Survey"
+  },
+  {
+    "name": "South Pole",
+    "latitude": -90.0,
+    "longitude": 0.0,
+    "source": "Amundsen-Scott Station"
+  }
+]

@@ -1,17 +1,11 @@
 ﻿package com.kutup.navigasyon
 
 import android.Manifest
-import android.app.Dialog
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.location.Location
-import android.location.LocationListener
-import android.location.LocationManager
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
-import android.os.CancellationSignal
 import android.util.Log
 import android.util.Size
 import android.widget.Button
@@ -29,11 +23,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import org.osmdroid.config.Configuration
-import org.osmdroid.tileprovider.tilesource.TileSourceFactory
-import org.osmdroid.util.GeoPoint
-import org.osmdroid.views.MapView
-import org.osmdroid.views.overlay.Marker
+import org.json.JSONArray
 import java.io.InputStream
 import java.util.Locale
 import java.util.concurrent.ExecutorService
@@ -42,39 +32,29 @@ import kotlin.math.abs
 
 class MainActivity : AppCompatActivity() {
 
+    enum class Hemisphere { NORTH, SOUTH }
+
+    data class PolarStation(
+        val name: String,
+        val latitude: Double,
+        val longitude: Double,
+        val source: String
+    )
+
     companion object {
         private const val TAG = "KutupNav"
         private const val REQUEST_CODE_PERMISSIONS = 10
-        private val REQUIRED_PERMISSIONS = arrayOf(
-            Manifest.permission.CAMERA,
-            Manifest.permission.ACCESS_FINE_LOCATION
-        )
-
-        private data class PolarStation(
-            val name: String,
-            val latitude: Double,
-            val longitude: Double
-        )
-
-        private val POLAR_STATIONS = listOf(
-            PolarStation("Longyearbyen", 78.2232, 15.6469),
-            PolarStation("Ny-Alesund", 78.9236, 11.9233),
-            PolarStation("Utqiagvik", 71.2906, -156.7886),
-            PolarStation("Tiksi", 71.6366, 128.8718),
-            PolarStation("Alert", 82.5018, -62.3481),
-            PolarStation("McMurdo", -77.8419, 166.6863),
-            PolarStation("Rothera", -67.5681, -68.1236),
-            PolarStation("South Pole", -90.0, 0.0)
-        )
+        private val REQUIRED_PERMISSIONS = arrayOf(Manifest.permission.CAMERA)
     }
 
     private lateinit var previewView: PreviewView
-    private lateinit var mapView: MapView
+    private lateinit var mapView: MiniMapView
     private lateinit var captureButton: Button
     private lateinit var galleryButton: Button
+    private lateinit var modeButton: Button
     private lateinit var compassStatusTextView: TextView
-    private lateinit var azimutuResultTextView: TextView
-    private lateinit var latitudeResultTextView: TextView
+    private lateinit var infoTextView: TextView
+    private lateinit var resultTextView: TextView
 
     private lateinit var compass: CompassSensor
     private lateinit var starDetector: StarDetector
@@ -82,19 +62,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var southernCrossFinder: SouthernCrossFinder
     private lateinit var latitudeSolver: LatitudeSolver
 
-    private lateinit var locationManager: LocationManager
-    private var locationListener: LocationListener? = null
-
     private lateinit var cameraExecutor: ExecutorService
     private var camera: Camera? = null
     private var imageCapture: ImageCapture? = null
 
-    private var cachedUserLocation: Location? = null
-    private var nearestStationName: String = "-"
-    private var nearestStationDistanceKm: Float = 0f
-    private var nearestStationBearing: Float = 0f
-
+    private var hemisphereMode = Hemisphere.NORTH
     private val verticalFov = 60f
+
+    private var stations: List<PolarStation> = emptyList()
 
     private val pickImageLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         if (uri == null) {
@@ -128,37 +103,25 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        stations = loadStationsFromAssets()
+
         initializeUI()
         initializeModules()
 
-        locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
-
         if (allPermissionsGranted()) {
             startCamera()
-            requestFreshLocationUpdates()
-            requestImmediateLocation()
-            updateLocationAndStationInfo()
         } else {
             ActivityCompat.requestPermissions(this, REQUIRED_PERMISSIONS, REQUEST_CODE_PERMISSIONS)
         }
 
         compass.startListening()
-    }
-
-    override fun onResume() {
-        super.onResume()
-        mapView.onResume()
-    }
-
-    override fun onPause() {
-        mapView.onPause()
-        super.onPause()
+        updateModeText()
+        drawMapForEstimatedLatitude(null)
     }
 
     override fun onDestroy() {
         super.onDestroy()
         compass.stopListening()
-        stopLocationUpdates()
         cameraExecutor.shutdown()
     }
 
@@ -167,41 +130,23 @@ class MainActivity : AppCompatActivity() {
         mapView = findViewById(R.id.mapView)
         captureButton = findViewById(R.id.captureButton)
         galleryButton = findViewById(R.id.galleryButton)
+        modeButton = findViewById(R.id.modeButton)
         compassStatusTextView = findViewById(R.id.compassStatus)
-        azimutuResultTextView = findViewById(R.id.azimutuResult)
-        latitudeResultTextView = findViewById(R.id.latitudeResult)
+        infoTextView = findViewById(R.id.azimutuResult)
+        resultTextView = findViewById(R.id.latitudeResult)
 
         captureButton.isEnabled = false
         captureButton.setOnClickListener { takePhoto() }
         galleryButton.setOnClickListener { pickImageLauncher.launch("image/*") }
+        modeButton.setOnClickListener {
+            hemisphereMode = if (hemisphereMode == Hemisphere.NORTH) Hemisphere.SOUTH else Hemisphere.NORTH
+            updateModeText()
+        }
+        mapView.setOnClickListener {
+            MiniMapView.showFullscreenMap(this, mapView.getMarkers(), mapView.getUserLabel())
+        }
 
         cameraExecutor = Executors.newSingleThreadExecutor()
-
-        initMap(mapView)
-        mapView.setOnClickListener { openFullScreenMap() }
-    }
-
-    private fun initMap(target: MapView) {
-        Configuration.getInstance().userAgentValue = packageName
-        target.setTileSource(TileSourceFactory.MAPNIK)
-        target.setMultiTouchControls(true)
-        target.controller.setZoom(2.5)
-        target.controller.setCenter(GeoPoint(20.0, 0.0))
-    }
-
-    private fun openFullScreenMap() {
-        val dialog = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
-        val fullMap = MapView(this)
-        initMap(fullMap)
-        updateMapMarkers(fullMap, cachedUserLocation)
-        fullMap.controller.setZoom(3.2)
-        dialog.setContentView(fullMap)
-        fullMap.setOnLongClickListener {
-            dialog.dismiss()
-            true
-        }
-        dialog.show()
-        Toast.makeText(this, "Kapatmak icin uzun bas", Toast.LENGTH_SHORT).show()
     }
 
     private fun initializeModules() {
@@ -212,7 +157,20 @@ class MainActivity : AppCompatActivity() {
         latitudeSolver = LatitudeSolver()
 
         compass.onAzimuthChanged = { azimuth ->
-            updateCompassDisplay(azimuth)
+            runOnUiThread {
+                val direction = compass.getCardinalDirection()
+                compassStatusTextView.text = String.format(Locale.US, "Pusula: %s %.0f°", direction, azimuth)
+            }
+        }
+    }
+
+    private fun updateModeText() {
+        val modeText = if (hemisphereMode == Hemisphere.NORTH) "MOD: KUZEY" else "MOD: GUNEY"
+        modeButton.text = modeText
+        infoTextView.text = if (hemisphereMode == Hemisphere.NORTH) {
+            "Mod: Kuzey (Polaris)"
+        } else {
+            "Mod: Guney (Guney Haci)"
         }
     }
 
@@ -231,11 +189,8 @@ class MainActivity : AppCompatActivity() {
         if (requestCode == REQUEST_CODE_PERMISSIONS) {
             if (allPermissionsGranted()) {
                 startCamera()
-                requestFreshLocationUpdates()
-                requestImmediateLocation()
-                updateLocationAndStationInfo()
             } else {
-                Toast.makeText(this, "Izinler reddedildi", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Kamera izni gerekli", Toast.LENGTH_SHORT).show()
                 finish()
             }
         }
@@ -243,7 +198,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-
         cameraProviderFuture.addListener({
             val cameraProvider = cameraProviderFuture.get()
 
@@ -271,7 +225,7 @@ class MainActivity : AppCompatActivity() {
     private fun takePhoto() {
         val localImageCapture = imageCapture
         if (localImageCapture == null) {
-            Toast.makeText(this, "Kamera henuz hazir degil", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Kamera hazir degil", Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -314,26 +268,30 @@ class MainActivity : AppCompatActivity() {
             val stars = starDetector.detectStars(bitmap)
             if (stars.isEmpty()) {
                 runOnUiThread {
-                    latitudeResultTextView.text = "Yildiz bulunamadi"
+                    resultTextView.text = "Yildiz bulunamadi"
                     setProcessingState(false)
                 }
                 return
             }
 
-            val loc = cachedUserLocation ?: findBestRecentLocation()
-            val isSouth = (loc?.latitude ?: 0.0) < 0.0
-
-            val (refStar, confidence, modeName) = if (isSouth) {
-                val (scp, c) = southernCrossFinder.findSouthCelestialPole(stars, bitmap.height, bitmap.width)
-                Triple(scp, c, "Guney Haci")
-            } else {
+            val (refStar, confidence, modeName) = if (hemisphereMode == Hemisphere.NORTH) {
                 val (polaris, c) = polarisFinder.findPolaris(stars, bitmap.height, bitmap.width)
                 Triple(polaris, c, "Polaris")
+            } else {
+                val (scp, c) = southernCrossFinder.findSouthCelestialPole(stars, bitmap.height, bitmap.width)
+                Triple(scp, c, "Guney Haci")
+            }
+
+            if (confidence < 0.20f) {
+                runOnUiThread {
+                    resultTextView.text = "Guven dusuk, tekrar cek"
+                    setProcessingState(false)
+                }
+                return
             }
 
             var result = latitudeSolver.calculateLatitude(refStar.y, bitmap.height, verticalFov)
-
-            if (isSouth) {
+            if (hemisphereMode == Hemisphere.SOUTH) {
                 val signed = -abs(result.latitude)
                 val err = result.errorMargin
                 result = result.copy(
@@ -345,206 +303,87 @@ class MainActivity : AppCompatActivity() {
             }
 
             runOnUiThread {
-                latitudeResultTextView.text = String.format(
+                resultTextView.text = String.format(
                     Locale.US,
-                    "%s | Enlem %.4f | Hata +/-%.2f | Guven %.2f",
+                    "%s | Tahmini enlem %.4f | Hata +/-%.2f",
                     modeName,
                     result.latitude,
-                    result.errorMargin,
-                    confidence
+                    result.errorMargin
                 )
+
+                val nearest = findNearestStationByLatitude(result.latitude.toDouble())
+                if (nearest != null) {
+                    infoTextView.text = String.format(
+                        Locale.US,
+                        "Mod: %s | En yakin istasyon: %s",
+                        if (hemisphereMode == Hemisphere.NORTH) "Kuzey" else "Guney",
+                        nearest.name
+                    )
+                }
+
+                drawMapForEstimatedLatitude(result.latitude.toDouble())
                 setProcessingState(false)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Bitmap isleme hatasi", e)
             runOnUiThread {
-                latitudeResultTextView.text = "Isleme hatasi"
+                resultTextView.text = "Isleme hatasi"
                 setProcessingState(false)
             }
         }
     }
 
-    private fun requestFreshLocationUpdates() {
-        if (!allPermissionsGranted()) return
-
-        val listener = LocationListener { location ->
-            val current = cachedUserLocation
-            if (current == null || isBetterLocation(location, current)) {
-                cachedUserLocation = location
-                runOnUiThread { updateLocationAndStationInfo() }
-            }
-        }
-        locationListener = listener
-
-        try {
-            if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-                locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 2000L, 2f, listener, mainLooper)
-            }
-        } catch (_: Exception) {
-        }
-
-        try {
-            if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
-                locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 3000L, 5f, listener, mainLooper)
-            }
-        } catch (_: Exception) {
-        }
+    private fun findNearestStationByLatitude(estimatedLat: Double): PolarStation? {
+        if (stations.isEmpty()) return null
+        return stations.minByOrNull { abs(it.latitude - estimatedLat) }
     }
 
-    private fun requestImmediateLocation() {
-        if (!allPermissionsGranted()) return
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
-
-        try {
-            locationManager.getCurrentLocation(LocationManager.GPS_PROVIDER, CancellationSignal(), mainExecutor) { loc ->
-                if (loc != null && (cachedUserLocation == null || isBetterLocation(loc, cachedUserLocation!!))) {
-                    cachedUserLocation = loc
-                    updateLocationAndStationInfo()
-                }
-            }
-        } catch (_: Exception) {
+    private fun drawMapForEstimatedLatitude(estimatedLat: Double?) {
+        val markers = mutableListOf<MapMarker>()
+        for (s in stations) {
+            markers.add(MapMarker(s.name, s.latitude, s.longitude, 0xFF4FC3F7.toInt(), 6f))
         }
 
-        try {
-            locationManager.getCurrentLocation(LocationManager.NETWORK_PROVIDER, CancellationSignal(), mainExecutor) { loc ->
-                if (loc != null && (cachedUserLocation == null || isBetterLocation(loc, cachedUserLocation!!))) {
-                    cachedUserLocation = loc
-                    updateLocationAndStationInfo()
-                }
-            }
-        } catch (_: Exception) {
-        }
-    }
-
-    private fun stopLocationUpdates() {
-        val listener = locationListener ?: return
-        try {
-            locationManager.removeUpdates(listener)
-        } catch (_: Exception) {
-        }
-        locationListener = null
-    }
-
-    private fun isBetterLocation(newLoc: Location, current: Location): Boolean {
-        val timeDelta = newLoc.time - current.time
-        val isSignificantlyNewer = timeDelta > 120_000
-        val isSignificantlyOlder = timeDelta < -120_000
-        if (isSignificantlyNewer) return true
-        if (isSignificantlyOlder) return false
-
-        val accuracyDelta = newLoc.accuracy - current.accuracy
-        val isMoreAccurate = accuracyDelta < 0
-        val isNewer = timeDelta > 0
-
-        return isMoreAccurate || (isNewer && accuracyDelta <= 10f)
-    }
-
-    private fun findBestRecentLocation(): Location? {
-        val providers = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER, LocationManager.PASSIVE_PROVIDER)
-        var best: Location? = null
-        val now = System.currentTimeMillis()
-
-        for (provider in providers) {
-            try {
-                val loc = locationManager.getLastKnownLocation(provider) ?: continue
-                if (now - loc.time > 15 * 60 * 1000) continue
-                if (best == null || isBetterLocation(loc, best)) {
-                    best = loc
-                }
-            } catch (_: Exception) {
-            }
-        }
-        return best
-    }
-
-    private fun updateLocationAndStationInfo() {
-        if (!allPermissionsGranted()) {
-            azimutuResultTextView.text = "Konum izni yok"
-            return
-        }
-
-        val user = cachedUserLocation ?: findBestRecentLocation()
-        if (user == null) {
-            azimutuResultTextView.text = "Konum bekleniyor"
-            return
-        }
-        cachedUserLocation = user
-
-        var nearestName = "-"
-        var nearestDistance = Float.MAX_VALUE
-        var nearestBearing = 0f
-
-        val userLoc = Location("user").apply {
-            latitude = user.latitude
-            longitude = user.longitude
-        }
-
-        for (station in POLAR_STATIONS) {
-            val stationLoc = Location("station").apply {
-                latitude = station.latitude
-                longitude = station.longitude
-            }
-            val dist = userLoc.distanceTo(stationLoc)
-            if (dist < nearestDistance) {
-                nearestDistance = dist
-                nearestName = station.name
-                nearestBearing = userLoc.bearingTo(stationLoc)
+        if (estimatedLat != null) {
+            val nearest = findNearestStationByLatitude(estimatedLat)
+            if (nearest != null) {
+                markers.add(MapMarker("Tahmini", estimatedLat, nearest.longitude, 0xFFFF5252.toInt(), 9f))
+                markers.add(MapMarker("En yakin", nearest.latitude, nearest.longitude, 0xFFFFC107.toInt(), 8f))
+                mapView.setMapData(markers, "Kirmizi: Tahmini | Sari: En yakin")
+                return
             }
         }
 
-        nearestStationName = nearestName
-        nearestStationDistanceKm = nearestDistance / 1000f
-        nearestStationBearing = normalizeBearing(nearestBearing)
-
-        val dir = bearingToDirection(nearestStationBearing)
-        val acc = if (user.hasAccuracy()) String.format(Locale.US, "%.0fm", user.accuracy) else "?"
-
-        azimutuResultTextView.text = String.format(
-            Locale.US,
-            "Konum: %.5f, %.5f (%s)\nEn yakin: %s | %.1f km | %s",
-            user.latitude,
-            user.longitude,
-            acc,
-            nearestStationName,
-            nearestStationDistanceKm,
-            dir
-        )
-
-        updateMapMarkers(mapView, user)
-    }
-
-    private fun updateMapMarkers(targetMap: MapView, user: Location?) {
-        targetMap.overlays.removeAll { it is Marker }
-
-        for (station in POLAR_STATIONS) {
-            val marker = Marker(targetMap)
-            marker.position = GeoPoint(station.latitude, station.longitude)
-            marker.title = station.name
-            marker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-            marker.icon = ContextCompat.getDrawable(
-                this,
-                if (station.name == nearestStationName) android.R.drawable.presence_away else android.R.drawable.presence_online
-            )
-            targetMap.overlays.add(marker)
-        }
-
-        if (user != null) {
-            val me = Marker(targetMap)
-            me.position = GeoPoint(user.latitude, user.longitude)
-            me.title = "Siz"
-            me.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-            me.icon = ContextCompat.getDrawable(this, android.R.drawable.presence_busy)
-            targetMap.overlays.add(me)
-            targetMap.controller.setCenter(GeoPoint(user.latitude, user.longitude))
-            targetMap.controller.setZoom(4.0)
-        }
-
-        targetMap.invalidate()
+        mapView.setMapData(markers, "Mavi: Istasyonlar")
     }
 
     private fun setProcessingState(isProcessing: Boolean) {
         captureButton.isEnabled = !isProcessing && imageCapture != null
         galleryButton.isEnabled = !isProcessing
+        modeButton.isEnabled = !isProcessing
+    }
+
+    private fun loadStationsFromAssets(): List<PolarStation> {
+        return try {
+            val json = assets.open("polar_stations.json").bufferedReader().use { it.readText() }
+            val arr = JSONArray(json)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    add(
+                        PolarStation(
+                            name = o.getString("name"),
+                            latitude = o.getDouble("latitude"),
+                            longitude = o.getDouble("longitude"),
+                            source = o.optString("source", "trusted")
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Istasyon verisi okunamadi", e)
+            emptyList()
+        }
     }
 
     private fun imageToBitmap(image: ImageProxy): Bitmap {
@@ -601,24 +440,5 @@ class MainActivity : AppCompatActivity() {
             if (input == null) return null
             return BitmapFactory.decodeStream(input, null, opts)
         }
-    }
-
-    private fun updateCompassDisplay(azimuth: Float) {
-        runOnUiThread {
-            val direction = compass.getCardinalDirection()
-            compassStatusTextView.text = String.format(Locale.US, "Pusula: %s %.0f°", direction, azimuth)
-        }
-    }
-
-    private fun normalizeBearing(bearing: Float): Float {
-        var b = bearing % 360f
-        if (b < 0f) b += 360f
-        return b
-    }
-
-    private fun bearingToDirection(bearing: Float): String {
-        val dirs = listOf("K", "KD", "D", "GD", "G", "GB", "B", "KB")
-        val idx = (((bearing + 22.5f) / 45f).toInt()) % 8
-        return dirs[idx]
     }
 }

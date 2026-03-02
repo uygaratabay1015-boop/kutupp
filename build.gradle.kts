@@ -45,11 +45,6 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:1.3.0-beta01")
     implementation("androidx.camera:camera-view:1.3.0-beta01")
 
-    implementation("org.osmdroid:osmdroid-android:6.1.18")
-
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.1")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.1")
-
     implementation("com.google.android.material:material:1.10.0")
 
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.6.2")
