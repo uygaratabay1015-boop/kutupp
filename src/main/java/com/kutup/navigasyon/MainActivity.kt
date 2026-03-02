@@ -1,4 +1,4 @@
-package com.kutup.navigasyon
+ï»¿package com.kutup.navigasyon
 
 import android.Manifest
 import android.content.pm.PackageManager
@@ -8,7 +8,9 @@ import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.CancellationSignal
 import android.util.Log
 import android.util.Size
 import android.widget.Button
@@ -82,6 +84,8 @@ class MainActivity : AppCompatActivity() {
     private var imageCapture: ImageCapture? = null
 
     private var cachedUserLocation: Location? = null
+    private var latestMarkers: List<MapMarker> = emptyList()
+    private var latestMapLabel: String = ""
 
     private val verticalFov = 60f
 
@@ -125,6 +129,7 @@ class MainActivity : AppCompatActivity() {
         if (allPermissionsGranted()) {
             startCamera()
             requestFreshLocationUpdates()
+            requestImmediateLocation()
             updateLocationAndStationInfo()
         } else {
             ActivityCompat.requestPermissions(this, REQUIRED_PERMISSIONS, REQUEST_CODE_PERMISSIONS)
@@ -152,6 +157,9 @@ class MainActivity : AppCompatActivity() {
         captureButton.isEnabled = false
         captureButton.setOnClickListener { takePhoto() }
         galleryButton.setOnClickListener { pickImageLauncher.launch("image/*") }
+        mapView.setOnClickListener {
+            MiniMapView.showFullscreenMap(this, latestMarkers, latestMapLabel)
+        }
 
         cameraExecutor = Executors.newSingleThreadExecutor()
     }
@@ -184,6 +192,7 @@ class MainActivity : AppCompatActivity() {
             if (allPermissionsGranted()) {
                 startCamera()
                 requestFreshLocationUpdates()
+                requestImmediateLocation()
                 updateLocationAndStationInfo()
             } else {
                 Toast.makeText(this, "Izinler reddedildi", Toast.LENGTH_SHORT).show()
@@ -299,7 +308,7 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 latitudeResultTextView.text = String.format(
                     Locale.US,
-                    "%s | Enlem %.3f | Hata +/-%.2f | Guven %.2f",
+                    "%s | Enlem %.4f | Hata +/-%.2f | Guven %.2f",
                     modeName,
                     result.latitude,
                     result.errorMargin,
@@ -343,6 +352,39 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun requestImmediateLocation() {
+        if (!allPermissionsGranted()) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+
+        try {
+            locationManager.getCurrentLocation(
+                LocationManager.GPS_PROVIDER,
+                CancellationSignal(),
+                mainExecutor
+            ) { loc ->
+                if (loc != null && (cachedUserLocation == null || isBetterLocation(loc, cachedUserLocation!!))) {
+                    cachedUserLocation = loc
+                    updateLocationAndStationInfo()
+                }
+            }
+        } catch (_: Exception) {
+        }
+
+        try {
+            locationManager.getCurrentLocation(
+                LocationManager.NETWORK_PROVIDER,
+                CancellationSignal(),
+                mainExecutor
+            ) { loc ->
+                if (loc != null && (cachedUserLocation == null || isBetterLocation(loc, cachedUserLocation!!))) {
+                    cachedUserLocation = loc
+                    updateLocationAndStationInfo()
+                }
+            }
+        } catch (_: Exception) {
+        }
+    }
+
     private fun stopLocationUpdates() {
         val listener = locationListener ?: return
         try {
@@ -359,7 +401,7 @@ class MainActivity : AppCompatActivity() {
         if (isSignificantlyNewer) return true
         if (isSignificantlyOlder) return false
 
-        val accuracyDelta = (newLoc.accuracy - current.accuracy)
+        val accuracyDelta = newLoc.accuracy - current.accuracy
         val isMoreAccurate = accuracyDelta < 0
         val isNewer = timeDelta > 0
 
@@ -428,7 +470,7 @@ class MainActivity : AppCompatActivity() {
 
         azimutuResultTextView.text = String.format(
             Locale.US,
-            "Konum %.4f, %.4f (%s) | Mod: %s\nEn yakin: %s %.1fkm %s %.0f°",
+            "Konum %.5f, %.5f (%s) | Mod: %s\nEn yakin: %s %.1fkm %s %.0fÂ°",
             user.latitude,
             user.longitude,
             acc,
@@ -442,11 +484,14 @@ class MainActivity : AppCompatActivity() {
         val markers = mutableListOf<MapMarker>()
         for (station in POLAR_STATIONS) {
             val color = if (station.name == nearestName) 0xFFFFC107.toInt() else 0xFF4FC3F7.toInt()
-            markers.add(MapMarker(station.name, station.latitude, station.longitude, color, if (station.name == nearestName) 8f else 6f))
+            val radius = if (station.name == nearestName) 8f else 6f
+            markers.add(MapMarker(station.name, station.latitude, station.longitude, color, radius))
         }
         markers.add(MapMarker("Siz", user.latitude, user.longitude, 0xFFFF5252.toInt(), 9f))
 
-        mapView.setMapData(markers, "Kirmizi: Siz | Sari: En yakin")
+        latestMarkers = markers
+        latestMapLabel = "Kirmizi: Siz | Sari: En yakin | Mavi: Diger"
+        mapView.setMapData(latestMarkers, latestMapLabel)
     }
 
     private fun setProcessingState(isProcessing: Boolean) {
@@ -514,7 +559,7 @@ class MainActivity : AppCompatActivity() {
     private fun updateCompassDisplay(azimuth: Float) {
         runOnUiThread {
             val direction = compass.getCardinalDirection()
-            compassStatusTextView.text = String.format(Locale.US, "Pusula: %s %.0f°", direction, azimuth)
+            compassStatusTextView.text = String.format(Locale.US, "Pusula: %s %.0fÂ°", direction, azimuth)
         }
     }
 

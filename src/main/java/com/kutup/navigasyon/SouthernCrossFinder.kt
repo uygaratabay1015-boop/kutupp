@@ -1,4 +1,4 @@
-package com.kutup.navigasyon
+﻿package com.kutup.navigasyon
 
 import kotlin.math.abs
 import kotlin.math.hypot
@@ -91,3 +91,4 @@ class SouthernCrossFinder {
         return Pair(bestPole, bestScore.coerceAtLeast(0f))
     }
 }
+
