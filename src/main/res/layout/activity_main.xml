@@ -18,10 +18,10 @@
         android:background="@color/dark_gray"
         android:padding="10dp">
 
-        <com.kutup.navigasyon.MiniMapView
+        <org.osmdroid.views.MapView
             android:id="@+id/mapView"
             android:layout_width="match_parent"
-            android:layout_height="140dp"
+            android:layout_height="170dp"
             android:layout_marginBottom="8dp" />
 
         <TextView
@@ -31,7 +31,7 @@
             android:text="Pusula hazirlaniyor..."
             android:textColor="@color/light_gray"
             android:textSize="11sp"
-            android:maxLines="2"
+            android:maxLines="1"
             android:ellipsize="end"
             android:fontFamily="monospace" />
 
@@ -43,7 +43,7 @@
             android:text="Konum bekleniyor..."
             android:textColor="@color/light_gray"
             android:textSize="11sp"
-            android:maxLines="3"
+            android:maxLines="2"
             android:ellipsize="end"
             android:fontFamily="monospace" />
 
@@ -52,10 +52,10 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:text="Sonuc burada gosterilir"
+            android:text="Sonuc burada"
             android:textColor="@color/light_gray"
             android:textSize="11sp"
-            android:maxLines="3"
+            android:maxLines="2"
             android:ellipsize="end"
             android:fontFamily="monospace" />
 
@@ -93,4 +93,3 @@
     </LinearLayout>
 
 </LinearLayout>
-

@@ -1,6 +1,7 @@
 ﻿package com.kutup.navigasyon
 
 import android.Manifest
+import android.app.Dialog
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -28,6 +29,11 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import org.osmdroid.config.Configuration
+import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import org.osmdroid.util.GeoPoint
+import org.osmdroid.views.MapView
+import org.osmdroid.views.overlay.Marker
 import java.io.InputStream
 import java.util.Locale
 import java.util.concurrent.ExecutorService
@@ -63,7 +69,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private lateinit var previewView: PreviewView
-    private lateinit var mapView: MiniMapView
+    private lateinit var mapView: MapView
     private lateinit var captureButton: Button
     private lateinit var galleryButton: Button
     private lateinit var compassStatusTextView: TextView
@@ -84,8 +90,9 @@ class MainActivity : AppCompatActivity() {
     private var imageCapture: ImageCapture? = null
 
     private var cachedUserLocation: Location? = null
-    private var latestMarkers: List<MapMarker> = emptyList()
-    private var latestMapLabel: String = ""
+    private var nearestStationName: String = "-"
+    private var nearestStationDistanceKm: Float = 0f
+    private var nearestStationBearing: Float = 0f
 
     private val verticalFov = 60f
 
@@ -138,6 +145,16 @@ class MainActivity : AppCompatActivity() {
         compass.startListening()
     }
 
+    override fun onResume() {
+        super.onResume()
+        mapView.onResume()
+    }
+
+    override fun onPause() {
+        mapView.onPause()
+        super.onPause()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         compass.stopListening()
@@ -157,11 +174,34 @@ class MainActivity : AppCompatActivity() {
         captureButton.isEnabled = false
         captureButton.setOnClickListener { takePhoto() }
         galleryButton.setOnClickListener { pickImageLauncher.launch("image/*") }
-        mapView.setOnClickListener {
-            MiniMapView.showFullscreenMap(this, latestMarkers, latestMapLabel)
-        }
 
         cameraExecutor = Executors.newSingleThreadExecutor()
+
+        initMap(mapView)
+        mapView.setOnClickListener { openFullScreenMap() }
+    }
+
+    private fun initMap(target: MapView) {
+        Configuration.getInstance().userAgentValue = packageName
+        target.setTileSource(TileSourceFactory.MAPNIK)
+        target.setMultiTouchControls(true)
+        target.controller.setZoom(2.5)
+        target.controller.setCenter(GeoPoint(20.0, 0.0))
+    }
+
+    private fun openFullScreenMap() {
+        val dialog = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+        val fullMap = MapView(this)
+        initMap(fullMap)
+        updateMapMarkers(fullMap, cachedUserLocation)
+        fullMap.controller.setZoom(3.2)
+        dialog.setContentView(fullMap)
+        fullMap.setOnLongClickListener {
+            dialog.dismiss()
+            true
+        }
+        dialog.show()
+        Toast.makeText(this, "Kapatmak icin uzun bas", Toast.LENGTH_SHORT).show()
     }
 
     private fun initializeModules() {
@@ -283,15 +323,14 @@ class MainActivity : AppCompatActivity() {
             val loc = cachedUserLocation ?: findBestRecentLocation()
             val isSouth = (loc?.latitude ?: 0.0) < 0.0
 
-            val referenceResult = if (isSouth) {
-                val (scp, confidence) = southernCrossFinder.findSouthCelestialPole(stars, bitmap.height, bitmap.width)
-                Triple(scp, confidence, "Guney Haci")
+            val (refStar, confidence, modeName) = if (isSouth) {
+                val (scp, c) = southernCrossFinder.findSouthCelestialPole(stars, bitmap.height, bitmap.width)
+                Triple(scp, c, "Guney Haci")
             } else {
-                val (polaris, confidence) = polarisFinder.findPolaris(stars, bitmap.height, bitmap.width)
-                Triple(polaris, confidence, "Polaris")
+                val (polaris, c) = polarisFinder.findPolaris(stars, bitmap.height, bitmap.width)
+                Triple(polaris, c, "Polaris")
             }
 
-            val (refStar, confidence, modeName) = referenceResult
             var result = latitudeSolver.calculateLatitude(refStar.y, bitmap.height, verticalFov)
 
             if (isSouth) {
@@ -357,11 +396,7 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
 
         try {
-            locationManager.getCurrentLocation(
-                LocationManager.GPS_PROVIDER,
-                CancellationSignal(),
-                mainExecutor
-            ) { loc ->
+            locationManager.getCurrentLocation(LocationManager.GPS_PROVIDER, CancellationSignal(), mainExecutor) { loc ->
                 if (loc != null && (cachedUserLocation == null || isBetterLocation(loc, cachedUserLocation!!))) {
                     cachedUserLocation = loc
                     updateLocationAndStationInfo()
@@ -371,11 +406,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         try {
-            locationManager.getCurrentLocation(
-                LocationManager.NETWORK_PROVIDER,
-                CancellationSignal(),
-                mainExecutor
-            ) { loc ->
+            locationManager.getCurrentLocation(LocationManager.NETWORK_PROVIDER, CancellationSignal(), mainExecutor) { loc ->
                 if (loc != null && (cachedUserLocation == null || isBetterLocation(loc, cachedUserLocation!!))) {
                     cachedUserLocation = loc
                     updateLocationAndStationInfo()
@@ -439,7 +470,7 @@ class MainActivity : AppCompatActivity() {
         }
         cachedUserLocation = user
 
-        var nearest: PolarStation? = null
+        var nearestName = "-"
         var nearestDistance = Float.MAX_VALUE
         var nearestBearing = 0f
 
@@ -456,42 +487,59 @@ class MainActivity : AppCompatActivity() {
             val dist = userLoc.distanceTo(stationLoc)
             if (dist < nearestDistance) {
                 nearestDistance = dist
-                nearest = station
+                nearestName = station.name
                 nearestBearing = userLoc.bearingTo(stationLoc)
             }
         }
 
-        val nearestName = nearest?.name ?: "-"
-        val bearing360 = normalizeBearing(nearestBearing)
-        val dir = bearingToDirection(bearing360)
-        val km = nearestDistance / 1000f
+        nearestStationName = nearestName
+        nearestStationDistanceKm = nearestDistance / 1000f
+        nearestStationBearing = normalizeBearing(nearestBearing)
+
+        val dir = bearingToDirection(nearestStationBearing)
         val acc = if (user.hasAccuracy()) String.format(Locale.US, "%.0fm", user.accuracy) else "?"
-        val mode = if (user.latitude < 0) "Guney Haci" else "Polaris"
 
         azimutuResultTextView.text = String.format(
             Locale.US,
-            "Konum %.5f, %.5f (%s) | Mod: %s\nEn yakin: %s %.1fkm %s %.0f°",
+            "Konum: %.5f, %.5f (%s)\nEn yakin: %s | %.1f km | %s",
             user.latitude,
             user.longitude,
             acc,
-            mode,
-            nearestName,
-            km,
-            dir,
-            bearing360
+            nearestStationName,
+            nearestStationDistanceKm,
+            dir
         )
 
-        val markers = mutableListOf<MapMarker>()
-        for (station in POLAR_STATIONS) {
-            val color = if (station.name == nearestName) 0xFFFFC107.toInt() else 0xFF4FC3F7.toInt()
-            val radius = if (station.name == nearestName) 8f else 6f
-            markers.add(MapMarker(station.name, station.latitude, station.longitude, color, radius))
-        }
-        markers.add(MapMarker("Siz", user.latitude, user.longitude, 0xFFFF5252.toInt(), 9f))
+        updateMapMarkers(mapView, user)
+    }
 
-        latestMarkers = markers
-        latestMapLabel = "Kirmizi: Siz | Sari: En yakin | Mavi: Diger"
-        mapView.setMapData(latestMarkers, latestMapLabel)
+    private fun updateMapMarkers(targetMap: MapView, user: Location?) {
+        targetMap.overlays.removeAll { it is Marker }
+
+        for (station in POLAR_STATIONS) {
+            val marker = Marker(targetMap)
+            marker.position = GeoPoint(station.latitude, station.longitude)
+            marker.title = station.name
+            marker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+            marker.icon = ContextCompat.getDrawable(
+                this,
+                if (station.name == nearestStationName) android.R.drawable.presence_away else android.R.drawable.presence_online
+            )
+            targetMap.overlays.add(marker)
+        }
+
+        if (user != null) {
+            val me = Marker(targetMap)
+            me.position = GeoPoint(user.latitude, user.longitude)
+            me.title = "Siz"
+            me.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+            me.icon = ContextCompat.getDrawable(this, android.R.drawable.presence_busy)
+            targetMap.overlays.add(me)
+            targetMap.controller.setCenter(GeoPoint(user.latitude, user.longitude))
+            targetMap.controller.setZoom(4.0)
+        }
+
+        targetMap.invalidate()
     }
 
     private fun setProcessingState(isProcessing: Boolean) {
@@ -507,7 +555,6 @@ class MainActivity : AppCompatActivity() {
 
         val srcWidth = image.width
         val srcHeight = image.height
-
         val maxDim = 960
         val scale = maxOf(1, maxOf(srcWidth, srcHeight) / maxDim)
         val outWidth = srcWidth / scale
