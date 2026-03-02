@@ -1,4 +1,4 @@
-﻿package com.kutup.navigasyon
+package com.kutup.navigasyon
 
 import android.Manifest
 import android.content.pm.PackageManager
@@ -23,7 +23,6 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import org.json.JSONArray
 import java.io.InputStream
 import java.util.Locale
 import java.util.concurrent.ExecutorService
@@ -34,13 +33,6 @@ class MainActivity : AppCompatActivity() {
 
     enum class Hemisphere { NORTH, SOUTH }
 
-    data class PolarStation(
-        val name: String,
-        val latitude: Double,
-        val longitude: Double,
-        val source: String
-    )
-
     companion object {
         private const val TAG = "KutupNav"
         private const val REQUEST_CODE_PERMISSIONS = 10
@@ -48,7 +40,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private lateinit var previewView: PreviewView
-    private lateinit var mapView: MiniMapView
     private lateinit var captureButton: Button
     private lateinit var galleryButton: Button
     private lateinit var modeButton: Button
@@ -69,8 +60,6 @@ class MainActivity : AppCompatActivity() {
 
     private var hemisphereMode = Hemisphere.NORTH
     private val verticalFov = 60f
-
-    private var stations: List<PolarStation> = emptyList()
 
     private val pickImageLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         if (uri == null) {
@@ -104,7 +93,6 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        stations = loadStationsFromAssets()
         skyPatternMatcher = loadSkyPatternMatcher()
 
         initializeUI()
@@ -118,7 +106,6 @@ class MainActivity : AppCompatActivity() {
 
         compass.startListening()
         updateModeText()
-        drawMapForEstimatedLatitude(null)
     }
 
     override fun onDestroy() {
@@ -129,7 +116,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun initializeUI() {
         previewView = findViewById(R.id.previewView)
-        mapView = findViewById(R.id.mapView)
         captureButton = findViewById(R.id.captureButton)
         galleryButton = findViewById(R.id.galleryButton)
         modeButton = findViewById(R.id.modeButton)
@@ -143,9 +129,6 @@ class MainActivity : AppCompatActivity() {
         modeButton.setOnClickListener {
             hemisphereMode = if (hemisphereMode == Hemisphere.NORTH) Hemisphere.SOUTH else Hemisphere.NORTH
             updateModeText()
-        }
-        mapView.setOnClickListener {
-            MiniMapView.showFullscreenMap(this, mapView.getMarkers(), mapView.getUserLabel())
         }
 
         cameraExecutor = Executors.newSingleThreadExecutor()
@@ -161,18 +144,23 @@ class MainActivity : AppCompatActivity() {
         compass.onAzimuthChanged = { azimuth ->
             runOnUiThread {
                 val direction = compass.getCardinalDirection()
-                compassStatusTextView.text = String.format(Locale.US, "Pusula: %s %.0f°", direction, azimuth)
+                compassStatusTextView.text = String.format(
+                    Locale.US,
+                    "Pusula: %s %.0f° | Pitch %.1f°",
+                    direction,
+                    azimuth,
+                    compass.getPitchDegrees()
+                )
             }
         }
     }
 
     private fun updateModeText() {
-        val modeText = if (hemisphereMode == Hemisphere.NORTH) "MOD: KUZEY" else "MOD: GUNEY"
-        modeButton.text = modeText
+        modeButton.text = if (hemisphereMode == Hemisphere.NORTH) "MOD: KUZEY" else "MOD: GUNEY"
         infoTextView.text = if (hemisphereMode == Hemisphere.NORTH) {
-            "Mod: Kuzey (Polaris)"
+            "Mod: Kuzey (Polaris + desen eslestirme)"
         } else {
-            "Mod: Guney (Guney Haci)"
+            "Mod: Guney (Guney Haci + desen eslestirme)"
         }
     }
 
@@ -268,72 +256,92 @@ class MainActivity : AppCompatActivity() {
     private fun processBitmap(bitmap: Bitmap) {
         try {
             val stars = starDetector.detectStars(bitmap)
-            if (stars.isEmpty()) {
+            if (stars.size < 4) {
                 runOnUiThread {
-                    resultTextView.text = "Yildiz bulunamadi"
+                    resultTextView.text = "Yeterli yildiz bulunamadi"
                     setProcessingState(false)
                 }
                 return
             }
 
-            val (refStar, confidence, modeName) = if (hemisphereMode == Hemisphere.NORTH) {
-                val (polaris, c) = polarisFinder.findPolaris(stars, bitmap.height, bitmap.width)
-                Triple(polaris, c, "Polaris")
-            } else {
-                val (scp, c) = southernCrossFinder.findSouthCelestialPole(stars, bitmap.height, bitmap.width)
-                Triple(scp, c, "Guney Haci")
-            }
-
-            val month = SkyPatternMatcher.currentMonth()
+            val dayOfYear = SkyPatternMatcher.currentDayOfYear()
             val patternResult = skyPatternMatcher.match(
                 stars = stars,
                 hemisphereMode = if (hemisphereMode == Hemisphere.NORTH) "north" else "south",
-                month = month
+                dayOfYear = dayOfYear
             )
-            val combinedConfidence = (0.6f * confidence + 0.4f * patternResult.confidence).coerceIn(0f, 1f)
 
-            if (combinedConfidence < 0.24f) {
+            val (candidateYs, referenceConfidence, modeName) = if (hemisphereMode == Hemisphere.NORTH) {
+                val scored = polarisFinder.scoreStars(stars, bitmap.height).take(8)
+                if (scored.isEmpty()) {
+                    Triple(emptyList(), 0f, "Polaris")
+                } else {
+                    val ys = scored.map { it.star.y to (0.15f + it.totalScore).coerceIn(0.15f, 1f) }
+                    val conf = scored.take(3).map { it.totalScore }.average().toFloat()
+                    Triple(ys, conf, "Polaris")
+                }
+            } else {
+                val southCandidates = southernCrossFinder.findSouthCelestialPoleCandidates(
+                    stars,
+                    bitmap.height,
+                    bitmap.width,
+                    maxCandidates = 8
+                )
+                if (southCandidates.isEmpty()) {
+                    Triple(emptyList(), 0f, "Guney Haci")
+                } else {
+                    val ys = southCandidates.map { it.pole.y to (0.15f + it.score).coerceIn(0.15f, 1f) }
+                    val conf = southCandidates.take(3).map { it.score }.average().toFloat()
+                    Triple(ys, conf, "Guney Haci")
+                }
+            }
+
+            if (candidateYs.isEmpty()) {
                 runOnUiThread {
-                    resultTextView.text = "Guven dusuk, tekrar cek"
+                    resultTextView.text = "Referans yildiz bulunamadi"
                     setProcessingState(false)
                 }
                 return
             }
 
-            var result = latitudeSolver.calculateLatitude(refStar.y, bitmap.height, verticalFov)
-            if (hemisphereMode == Hemisphere.SOUTH) {
-                val signed = -abs(result.latitude)
-                val err = result.errorMargin
-                result = result.copy(
-                    latitude = signed,
-                    lowerBound = signed - err,
-                    upperBound = signed + err,
-                    altitude = abs(result.altitude)
-                )
+            val combinedConfidence = (0.55f * referenceConfidence + 0.45f * patternResult.confidence).coerceIn(0f, 1f)
+            if (combinedConfidence < 0.22f) {
+                runOnUiThread {
+                    resultTextView.text = "Guven dusuk, telefonu sabitleyip tekrar cek"
+                    setProcessingState(false)
+                }
+                return
             }
 
+            val pitch = compass.getPitchDegrees()
+            val result = latitudeSolver.calculateLatitudeFromCandidates(
+                candidateYsWithWeight = candidateYs,
+                imageHeight = bitmap.height,
+                verticalFov = verticalFov,
+                cameraPitchDeg = pitch,
+                southernHemisphere = hemisphereMode == Hemisphere.SOUTH
+            )
+
             runOnUiThread {
+                val hemisphereLabel = if (result.latitude >= 0f) "K" else "G"
                 resultTextView.text = String.format(
                     Locale.US,
-                    "%s | Enlem %.4f | Hata +/-%.2f | Eslesme %.2f",
+                    "%s | Enlem %.4f°%s | Hata +/-%.2f° | Guven %.2f",
                     modeName,
-                    result.latitude,
+                    abs(result.latitude),
+                    hemisphereLabel,
                     result.errorMargin,
                     combinedConfidence
                 )
 
-                val nearest = findNearestStationByLatitude(result.latitude.toDouble())
-                if (nearest != null) {
-                    infoTextView.text = String.format(
-                        Locale.US,
-                        "Mod: %s | Eslesen yildiz deseni: %s | Istasyon: %s",
-                        if (hemisphereMode == Hemisphere.NORTH) "Kuzey" else "Guney",
-                        patternResult.matchedPattern,
-                        nearest.name
-                    )
-                }
+                infoTextView.text = String.format(
+                    Locale.US,
+                    "Desen: %s | Gun: %d | Yildiz: %d",
+                    patternResult.matchedPattern,
+                    dayOfYear,
+                    stars.size
+                )
 
-                drawMapForEstimatedLatitude(result.latitude.toDouble())
                 setProcessingState(false)
             }
         } catch (e: Exception) {
@@ -345,57 +353,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun findNearestStationByLatitude(estimatedLat: Double): PolarStation? {
-        if (stations.isEmpty()) return null
-        return stations.minByOrNull { abs(it.latitude - estimatedLat) }
-    }
-
-    private fun drawMapForEstimatedLatitude(estimatedLat: Double?) {
-        val markers = mutableListOf<MapMarker>()
-        for (s in stations) {
-            markers.add(MapMarker(s.name, s.latitude, s.longitude, 0xFF4FC3F7.toInt(), 6f))
-        }
-
-        if (estimatedLat != null) {
-            val nearest = findNearestStationByLatitude(estimatedLat)
-            if (nearest != null) {
-                markers.add(MapMarker("Tahmini", estimatedLat, nearest.longitude, 0xFFFF5252.toInt(), 9f))
-                markers.add(MapMarker("En yakin", nearest.latitude, nearest.longitude, 0xFFFFC107.toInt(), 8f))
-                mapView.setMapData(markers, "Kirmizi: Tahmini | Sari: En yakin")
-                return
-            }
-        }
-
-        mapView.setMapData(markers, "Mavi: Istasyonlar")
-    }
-
     private fun setProcessingState(isProcessing: Boolean) {
         captureButton.isEnabled = !isProcessing && imageCapture != null
         galleryButton.isEnabled = !isProcessing
         modeButton.isEnabled = !isProcessing
-    }
-
-    private fun loadStationsFromAssets(): List<PolarStation> {
-        return try {
-            val json = assets.open("polar_stations.json").bufferedReader().use { it.readText() }
-            val arr = JSONArray(json)
-            buildList {
-                for (i in 0 until arr.length()) {
-                    val o = arr.getJSONObject(i)
-                    add(
-                        PolarStation(
-                            name = o.getString("name"),
-                            latitude = o.getDouble("latitude"),
-                            longitude = o.getDouble("longitude"),
-                            source = o.optString("source", "trusted")
-                        )
-                    )
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Istasyon verisi okunamadi", e)
-            emptyList()
-        }
     }
 
     private fun loadSkyPatternMatcher(): SkyPatternMatcher {

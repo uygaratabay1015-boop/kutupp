@@ -5,125 +5,97 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
-import kotlin.math.abs
 
 /**
- * Telefon Pusula Sensörü - Gerçek Sensor Entegrasyonu
- * 
- * Manyetik alan sensöründen azimuth (yön) alır.
- * 0° = Kuzey, 90° = Doğu, 180° = Güney, 270° = Batı
+ * Gercek pusula + cihaz egimi (pitch/roll) verisi.
+ * pitch: + deger = kamera ufkun ustune kalkik kabul edilir.
  */
 class CompassSensor(private val context: Context) : SensorEventListener {
-    
+
     private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
     private val magneticFieldSensor = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
     private val accelerometerSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-    
+
     private var azimuth: Float = 0f
+    private var pitch: Float = 0f
+    private var roll: Float = 0f
+
     private var magnetometerData = FloatArray(3)
     private var accelerometerData = FloatArray(3)
-    private var rotationMatrix = FloatArray(9)
-    private var orientationValues = FloatArray(3)
-    
-    // Callback
+    private val orientationValues = FloatArray(3)
+
     var onAzimuthChanged: ((Float) -> Unit)? = null
-    
-    // Durumu takip et
+
     var isListening = false
         private set
-    
+
     fun startListening() {
-        if (!isListening) {
-            magneticFieldSensor?.let {
-                sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
-            }
-            accelerometerSensor?.let {
-                sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
-            }
-            isListening = true
-        }
+        if (isListening) return
+        magneticFieldSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
+        accelerometerSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
+        isListening = true
     }
-    
+
     fun stopListening() {
-        if (isListening) {
-            sensorManager.unregisterListener(this)
-            isListening = false
-        }
+        if (!isListening) return
+        sensorManager.unregisterListener(this)
+        isListening = false
     }
-    
+
     override fun onSensorChanged(event: SensorEvent?) {
         event ?: return
-        
+
         when (event.sensor.type) {
-            Sensor.TYPE_MAGNETIC_FIELD -> {
-                magnetometerData = event.values.copyOf()
-            }
-            Sensor.TYPE_ACCELEROMETER -> {
-                accelerometerData = event.values.copyOf()
-            }
+            Sensor.TYPE_MAGNETIC_FIELD -> magnetometerData = event.values.copyOf()
+            Sensor.TYPE_ACCELEROMETER -> accelerometerData = event.values.copyOf()
         }
-        
-        // Rotation matrix hesapla
-        val rotationMatrixComplete = FloatArray(9)
-        val success = SensorManager.getRotationMatrix(
-            rotationMatrixComplete,
-            null,
-            accelerometerData,
-            magnetometerData
-        )
-        
-        if (success) {
-            // Orientation hesapla
-            SensorManager.getOrientation(rotationMatrixComplete, orientationValues)
-            
-            // Azimuth (radyanı dereceye çevir)
-            azimuth = Math.toDegrees(orientationValues[0].toDouble()).toFloat()
-            
-            // 0-360 aralığına normalize et
-            if (azimuth < 0) {
-                azimuth += 360f
-            }
-            
-            // Callback çağır
-            onAzimuthChanged?.invoke(azimuth)
-        }
+
+        val rotationMatrix = FloatArray(9)
+        val success = SensorManager.getRotationMatrix(rotationMatrix, null, accelerometerData, magnetometerData)
+        if (!success) return
+
+        SensorManager.getOrientation(rotationMatrix, orientationValues)
+
+        val rawAzimuth = Math.toDegrees(orientationValues[0].toDouble()).toFloat().normalize360()
+        val rawPitchUpPositive = (-Math.toDegrees(orientationValues[1].toDouble())).toFloat()
+        val rawRoll = Math.toDegrees(orientationValues[2].toDouble()).toFloat()
+
+        azimuth = smoothAngle(azimuth, rawAzimuth, 0.18f)
+        pitch = smoothLinear(pitch, rawPitchUpPositive, 0.18f)
+        roll = smoothLinear(roll, rawRoll, 0.18f)
+
+        onAzimuthChanged?.invoke(azimuth)
     }
-    
-    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
-        // Sensör doğruluk değişimi
-    }
-    
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+
     fun getAzimuth(): Float = azimuth
-    
+
+    fun getPitchDegrees(): Float = pitch.coerceIn(-85f, 85f)
+
+    fun getRollDegrees(): Float = roll.coerceIn(-90f, 90f)
+
     fun getCardinalDirection(): String {
-        val directions = arrayOf(
-            "Kuzey",
-            "KuzeyDoğu",
-            "Doğu",
-            "DoğuGüney",
-            "Güney",
-            "GüneyBatı",
-            "Batı",
-            "BatıKuzey"
-        )
-        
-        val index = ((azimuth + 22.5) / 45).toInt() % 8
+        val directions = arrayOf("Kuzey", "KuzeyDogu", "Dogu", "DoguGuney", "Guney", "GuneyBati", "Bati", "BatiKuzey")
+        val index = ((azimuth + 22.5f) / 45f).toInt() % 8
         return directions[index]
     }
-    
-    fun isFacingNorth(tolerance: Float = 15f): Boolean {
-        val northMin = 360 - tolerance
-        val northMax = tolerance
-        return azimuth >= northMin || azimuth <= northMax
+
+    private fun Float.normalize360(): Float {
+        var v = this
+        while (v < 0f) v += 360f
+        while (v >= 360f) v -= 360f
+        return v
     }
-    
-    fun getDeviationFromNorth(): Float {
-        return if (azimuth <= 180) {
-            azimuth
-        } else {
-            azimuth - 360f
-        }
+
+    private fun smoothLinear(prev: Float, next: Float, alpha: Float): Float {
+        return prev + alpha * (next - prev)
     }
-    
-    fun getCorrectionAngle(): Float = -getDeviationFromNorth()
+
+    private fun smoothAngle(prev: Float, next: Float, alpha: Float): Float {
+        var delta = next - prev
+        if (delta > 180f) delta -= 360f
+        if (delta < -180f) delta += 360f
+        return (prev + alpha * delta).normalize360()
+    }
 }

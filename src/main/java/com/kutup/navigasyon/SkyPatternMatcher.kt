@@ -15,20 +15,17 @@ data class SkyPatternTemplate(
     val hemisphere: String,
     val triangleRatios: List<Float>,
     val quadRatios: List<Float>,
-    val visibleMonths: Set<Int>
+    val visibleMonths: Set<Int>,
+    val peakDay: Int?,
+    val daySpread: Int
 )
 
-/**
- * Heuristic constellation pattern matcher:
- * - compares normalized triangle/quad edge ratios
- * - weights score by current month visibility window
- */
 class SkyPatternMatcher(private val templates: List<SkyPatternTemplate>) {
 
-    fun match(stars: List<Star>, hemisphereMode: String, month: Int): PatternMatchResult {
+    fun match(stars: List<Star>, hemisphereMode: String, dayOfYear: Int): PatternMatchResult {
         if (stars.size < 4 || templates.isEmpty()) return PatternMatchResult(0f, "-")
 
-        val top = stars.sortedByDescending { it.brightness }.take(14)
+        val top = stars.sortedByDescending { it.brightness }.take(16)
         val observedTriangleRatios = buildTriangleRatios(top)
         val observedQuadRatios = buildQuadRatios(top)
         if (observedTriangleRatios.isEmpty()) return PatternMatchResult(0f, "-")
@@ -41,10 +38,10 @@ class SkyPatternMatcher(private val templates: List<SkyPatternTemplate>) {
 
             val triScore = compareRatioSets(observedTriangleRatios, t.triangleRatios)
             val quadScore = compareRatioSets(observedQuadRatios, t.quadRatios)
-            var score = 0.75f * triScore + 0.25f * quadScore
+            val shapeScore = (0.72f * triScore + 0.28f * quadScore).coerceIn(0f, 1f)
 
-            score += if (t.visibleMonths.contains(month)) 0.12f else -0.08f
-            score = score.coerceIn(0f, 1f)
+            val seasonalScore = seasonScore(t, dayOfYear)
+            val score = (0.65f * shapeScore + 0.35f * seasonalScore).coerceIn(0f, 1f)
 
             if (score > bestScore) {
                 bestScore = score
@@ -53,6 +50,30 @@ class SkyPatternMatcher(private val templates: List<SkyPatternTemplate>) {
         }
 
         return PatternMatchResult(bestScore, bestName)
+    }
+
+    private fun seasonScore(template: SkyPatternTemplate, dayOfYear: Int): Float {
+        val peak = template.peakDay
+        if (peak != null) {
+            val distance = circularDayDistance(dayOfYear, peak)
+            val spread = template.daySpread.coerceAtLeast(15)
+            return (1f - (distance.toFloat() / spread.toFloat())).coerceIn(0f, 1f)
+        }
+
+        val month = dayToMonth(dayOfYear)
+        return if (template.visibleMonths.contains(month)) 1f else 0.2f
+    }
+
+    private fun dayToMonth(dayOfYear: Int): Int {
+        val c = Calendar.getInstance()
+        c.set(Calendar.DAY_OF_YEAR, dayOfYear.coerceIn(1, 366))
+        return c.get(Calendar.MONTH) + 1
+    }
+
+    private fun circularDayDistance(a: Int, b: Int): Int {
+        val days = 366
+        val raw = abs(a - b)
+        return minOf(raw, days - raw)
     }
 
     private fun buildTriangleRatios(stars: List<Star>): List<Float> {
@@ -67,7 +88,7 @@ class SkyPatternMatcher(private val templates: List<SkyPatternTemplate>) {
                     if (edges[2] < 1f) continue
                     ratios.add((edges[0] / edges[2]).coerceIn(0f, 1f))
                     ratios.add((edges[1] / edges[2]).coerceIn(0f, 1f))
-                    if (ratios.size >= 20) return ratios
+                    if (ratios.size >= 24) return ratios
                 }
             }
         }
@@ -92,7 +113,7 @@ class SkyPatternMatcher(private val templates: List<SkyPatternTemplate>) {
                         if (ds.last() < 1f) continue
                         ratios.add((ds.first() / ds.last()).coerceIn(0f, 1f))
                         ratios.add((ds[2] / ds.last()).coerceIn(0f, 1f))
-                        if (ratios.size >= 12) return ratios
+                        if (ratios.size >= 16) return ratios
                     }
                 }
             }
@@ -134,8 +155,10 @@ class SkyPatternMatcher(private val templates: List<SkyPatternTemplate>) {
                 val qArr = o.getJSONArray("quadRatios")
                 for (j in 0 until qArr.length()) qa.add(qArr.getDouble(j).toFloat())
 
-                val mArr = o.getJSONArray("visibleMonths")
-                for (j in 0 until mArr.length()) months.add(mArr.getInt(j))
+                val mArr = o.optJSONArray("visibleMonths")
+                if (mArr != null) {
+                    for (j in 0 until mArr.length()) months.add(mArr.getInt(j))
+                }
 
                 list.add(
                     SkyPatternTemplate(
@@ -143,14 +166,15 @@ class SkyPatternMatcher(private val templates: List<SkyPatternTemplate>) {
                         hemisphere = o.getString("hemisphere"),
                         triangleRatios = tri,
                         quadRatios = qa,
-                        visibleMonths = months
+                        visibleMonths = months,
+                        peakDay = if (o.has("peakDay")) o.getInt("peakDay") else null,
+                        daySpread = o.optInt("daySpread", 45)
                     )
                 )
             }
             return SkyPatternMatcher(list)
         }
 
-        fun currentMonth(): Int = Calendar.getInstance().get(Calendar.MONTH) + 1
+        fun currentDayOfYear(): Int = Calendar.getInstance().get(Calendar.DAY_OF_YEAR)
     }
 }
-

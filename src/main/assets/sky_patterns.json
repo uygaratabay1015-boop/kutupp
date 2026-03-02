@@ -1,30 +1,26 @@
-﻿[
-  {
-    "name": "UrsaMinor_PolarisRegion",
-    "hemisphere": "north",
-    "triangleRatios": [0.36, 0.62, 0.41, 0.73],
-    "quadRatios": [0.22, 0.48, 0.65],
-    "visibleMonths": [1,2,3,4,5,6,7,8,9,10,11,12]
-  },
-  {
-    "name": "Cassiopeia_Companion",
-    "hemisphere": "north",
-    "triangleRatios": [0.45, 0.78, 0.39, 0.70],
-    "quadRatios": [0.18, 0.44, 0.69],
-    "visibleMonths": [8,9,10,11,12,1,2,3]
-  },
-  {
-    "name": "Crux_Main",
-    "hemisphere": "south",
-    "triangleRatios": [0.31, 0.58, 0.35, 0.66],
-    "quadRatios": [0.14, 0.38, 0.62],
-    "visibleMonths": [3,4,5,6,7,8,9]
-  },
-  {
-    "name": "Crux_CentaurusField",
-    "hemisphere": "south",
-    "triangleRatios": [0.28, 0.54, 0.42, 0.74],
-    "quadRatios": [0.16, 0.41, 0.67],
-    "visibleMonths": [2,3,4,5,6,7,8,9,10]
-  }
+[
+  {"name":"UrsaMinor_Jan","hemisphere":"north","triangleRatios":[0.36,0.62,0.41,0.73],"quadRatios":[0.22,0.48,0.65],"visibleMonths":[1,2],"peakDay":15,"daySpread":35},
+  {"name":"UrsaMinor_Feb","hemisphere":"north","triangleRatios":[0.37,0.61,0.42,0.72],"quadRatios":[0.23,0.47,0.64],"visibleMonths":[2,3],"peakDay":45,"daySpread":35},
+  {"name":"UrsaMinor_Mar","hemisphere":"north","triangleRatios":[0.38,0.60,0.43,0.71],"quadRatios":[0.24,0.46,0.63],"visibleMonths":[3,4],"peakDay":74,"daySpread":35},
+  {"name":"UrsaMinor_Apr","hemisphere":"north","triangleRatios":[0.39,0.59,0.44,0.70],"quadRatios":[0.24,0.45,0.62],"visibleMonths":[4,5],"peakDay":105,"daySpread":35},
+  {"name":"UrsaMinor_May","hemisphere":"north","triangleRatios":[0.40,0.58,0.45,0.69],"quadRatios":[0.25,0.45,0.62],"visibleMonths":[5,6],"peakDay":135,"daySpread":35},
+  {"name":"UrsaMinor_Jun","hemisphere":"north","triangleRatios":[0.41,0.58,0.46,0.68],"quadRatios":[0.25,0.44,0.61],"visibleMonths":[6,7],"peakDay":166,"daySpread":35},
+  {"name":"UrsaMinor_Jul","hemisphere":"north","triangleRatios":[0.41,0.59,0.45,0.69],"quadRatios":[0.24,0.44,0.62],"visibleMonths":[7,8],"peakDay":196,"daySpread":35},
+  {"name":"UrsaMinor_Aug","hemisphere":"north","triangleRatios":[0.40,0.60,0.44,0.70],"quadRatios":[0.24,0.45,0.63],"visibleMonths":[8,9],"peakDay":227,"daySpread":35},
+  {"name":"Cassiopeia_Sep","hemisphere":"north","triangleRatios":[0.45,0.78,0.39,0.70],"quadRatios":[0.18,0.44,0.69],"visibleMonths":[9,10],"peakDay":258,"daySpread":35},
+  {"name":"Cassiopeia_Oct","hemisphere":"north","triangleRatios":[0.44,0.77,0.40,0.69],"quadRatios":[0.19,0.44,0.68],"visibleMonths":[10,11],"peakDay":288,"daySpread":35},
+  {"name":"Cassiopeia_Nov","hemisphere":"north","triangleRatios":[0.43,0.76,0.41,0.68],"quadRatios":[0.20,0.45,0.67],"visibleMonths":[11,12],"peakDay":319,"daySpread":35},
+  {"name":"Cassiopeia_Dec","hemisphere":"north","triangleRatios":[0.42,0.75,0.41,0.69],"quadRatios":[0.20,0.46,0.67],"visibleMonths":[12,1],"peakDay":349,"daySpread":35},
+  {"name":"Crux_Jan","hemisphere":"south","triangleRatios":[0.29,0.55,0.40,0.72],"quadRatios":[0.16,0.41,0.67],"visibleMonths":[1,2],"peakDay":15,"daySpread":35},
+  {"name":"Crux_Feb","hemisphere":"south","triangleRatios":[0.30,0.56,0.39,0.71],"quadRatios":[0.16,0.40,0.66],"visibleMonths":[2,3],"peakDay":45,"daySpread":35},
+  {"name":"Crux_Mar","hemisphere":"south","triangleRatios":[0.31,0.58,0.35,0.66],"quadRatios":[0.14,0.38,0.62],"visibleMonths":[3,4],"peakDay":74,"daySpread":35},
+  {"name":"Crux_Apr","hemisphere":"south","triangleRatios":[0.31,0.57,0.36,0.67],"quadRatios":[0.14,0.39,0.63],"visibleMonths":[4,5],"peakDay":105,"daySpread":35},
+  {"name":"Crux_May","hemisphere":"south","triangleRatios":[0.30,0.56,0.37,0.68],"quadRatios":[0.15,0.39,0.64],"visibleMonths":[5,6],"peakDay":135,"daySpread":35},
+  {"name":"Crux_Jun","hemisphere":"south","triangleRatios":[0.29,0.55,0.38,0.69],"quadRatios":[0.15,0.40,0.65],"visibleMonths":[6,7],"peakDay":166,"daySpread":35},
+  {"name":"Crux_Jul","hemisphere":"south","triangleRatios":[0.29,0.54,0.39,0.70],"quadRatios":[0.16,0.40,0.66],"visibleMonths":[7,8],"peakDay":196,"daySpread":35},
+  {"name":"Crux_Aug","hemisphere":"south","triangleRatios":[0.28,0.54,0.40,0.71],"quadRatios":[0.16,0.41,0.67],"visibleMonths":[8,9],"peakDay":227,"daySpread":35},
+  {"name":"Crux_Sep","hemisphere":"south","triangleRatios":[0.28,0.53,0.41,0.72],"quadRatios":[0.17,0.42,0.68],"visibleMonths":[9,10],"peakDay":258,"daySpread":35},
+  {"name":"Crux_Oct","hemisphere":"south","triangleRatios":[0.28,0.53,0.42,0.73],"quadRatios":[0.17,0.42,0.69],"visibleMonths":[10,11],"peakDay":288,"daySpread":35},
+  {"name":"Crux_Nov","hemisphere":"south","triangleRatios":[0.28,0.54,0.41,0.74],"quadRatios":[0.16,0.41,0.69],"visibleMonths":[11,12],"peakDay":319,"daySpread":35},
+  {"name":"Crux_Dec","hemisphere":"south","triangleRatios":[0.29,0.54,0.40,0.73],"quadRatios":[0.16,0.41,0.68],"visibleMonths":[12,1],"peakDay":349,"daySpread":35}
 ]
