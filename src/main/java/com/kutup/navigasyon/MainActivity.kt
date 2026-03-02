@@ -52,7 +52,10 @@ class MainActivity : AppCompatActivity() {
             PolarStation("Ny-Alesund (Svalbard)", 78.9236, 11.9233),
             PolarStation("Utqiagvik (Alaska)", 71.2906, -156.7886),
             PolarStation("Tiksi (Saha)", 71.6366, 128.8718),
-            PolarStation("Alert (Nunavut)", 82.5018, -62.3481)
+            PolarStation("Alert (Nunavut)", 82.5018, -62.3481),
+            PolarStation("McMurdo (Antarktika)", -77.8419, 166.6863),
+            PolarStation("Rothera (Antarktika)", -67.5681, -68.1236),
+            PolarStation("Amundsen-Scott (Guney Kutbu)", -90.0000, 0.0000)
         )
     }
 
@@ -66,12 +69,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var compass: CompassSensor
     private lateinit var starDetector: StarDetector
     private lateinit var polarisFinder: PolarisFinder
+    private lateinit var southernCrossFinder: SouthernCrossFinder
     private lateinit var latitudeSolver: LatitudeSolver
 
     private lateinit var locationManager: LocationManager
     private lateinit var cameraExecutor: ExecutorService
     private var camera: Camera? = null
     private var imageCapture: ImageCapture? = null
+    private var cachedUserLocation: Location? = null
 
     private val verticalFov = 60f
 
@@ -113,6 +118,7 @@ class MainActivity : AppCompatActivity() {
         if (allPermissionsGranted()) {
             startCamera()
             updateLocationAndStationInfo()
+            requestFreshLocationUpdate()
         } else {
             ActivityCompat.requestPermissions(this, REQUIRED_PERMISSIONS, REQUEST_CODE_PERMISSIONS)
         }
@@ -140,6 +146,7 @@ class MainActivity : AppCompatActivity() {
         compass = CompassSensor(this)
         starDetector = StarDetector()
         polarisFinder = PolarisFinder()
+        southernCrossFinder = SouthernCrossFinder()
         latitudeSolver = LatitudeSolver()
 
         compass.onAzimuthChanged = { azimuth ->
@@ -167,6 +174,7 @@ class MainActivity : AppCompatActivity() {
             if (allPermissionsGranted()) {
                 startCamera()
                 updateLocationAndStationInfo()
+                requestFreshLocationUpdate()
             } else {
                 Toast.makeText(this, "Izinler reddedildi", Toast.LENGTH_SHORT).show()
                 finish()
@@ -257,15 +265,37 @@ class MainActivity : AppCompatActivity() {
                 return
             }
 
-            val (polaris, _) = polarisFinder.findPolaris(stars, bitmap.height, bitmap.width)
-            val latitudeResult = latitudeSolver.calculateLatitude(
-                polaris.y,
+            val userLocation = cachedUserLocation ?: findBestLastKnownLocation()
+            val isSouthernHemisphere = (userLocation?.latitude ?: 0.0) < 0.0
+
+            val (referenceStar, referenceName) = if (isSouthernHemisphere) {
+                val (southPolePoint, _) = southernCrossFinder.findSouthCelestialPole(stars, bitmap.height, bitmap.width)
+                Pair(southPolePoint, "Guney Haci (tahmini)")
+            } else {
+                val (polaris, _) = polarisFinder.findPolaris(stars, bitmap.height, bitmap.width)
+                Pair(polaris, "Polaris")
+            }
+
+            var latitudeResult = latitudeSolver.calculateLatitude(
+                referenceStar.y,
                 bitmap.height,
                 verticalFov
             )
 
+            if (isSouthernHemisphere) {
+                val absLatitude = kotlin.math.abs(latitudeResult.latitude)
+                val signedLatitude = -absLatitude
+                val error = latitudeResult.errorMargin
+                latitudeResult = latitudeResult.copy(
+                    latitude = signedLatitude,
+                    lowerBound = signedLatitude - error,
+                    upperBound = signedLatitude + error,
+                    altitude = kotlin.math.abs(latitudeResult.altitude)
+                )
+            }
+
             runOnUiThread {
-                displayResults(polaris, latitudeResult)
+                displayResults(referenceStar, latitudeResult, referenceName)
                 setProcessingState(false)
             }
         } catch (e: Exception) {
@@ -347,11 +377,12 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val userLocation = findBestLastKnownLocation()
+        val userLocation = cachedUserLocation ?: findBestLastKnownLocation()
         if (userLocation == null) {
             azimutuResultTextView.text = "Konum alinamadi (GPS acik olmali)"
             return
         }
+        cachedUserLocation = userLocation
 
         var nearest: PolarStation? = null
         var nearestDistanceMeters = Float.MAX_VALUE
@@ -382,10 +413,14 @@ class MainActivity : AppCompatActivity() {
         val bearing360 = normalizeBearing(nearestBearing)
         val directionText = bearingToDirection(bearing360)
         val distanceKm = nearestDistanceMeters / 1000f
+        val hemisphereText = if (userLocation.latitude < 0.0) "Guney Yarimkure (Guney Haci modu)" else "Kuzey Yarimkure (Polaris modu)"
+        val accuracyText = if (userLocation.hasAccuracy()) String.format(Locale.US, "%.0f m", userLocation.accuracy) else "bilinmiyor"
 
         azimutuResultTextView.text = """
             Konumunuz:
             ${formatCoord(userLocation.latitude, userLocation.longitude)}
+            Dogruluk: $accuracyText
+            Mod: $hemisphereText
 
             En yakin kutup istasyonu:
             ${nearest.name}
@@ -394,6 +429,29 @@ class MainActivity : AppCompatActivity() {
             Uzaklik: ${String.format(Locale.US, "%.1f", distanceKm)} km
             Yon: ${String.format(Locale.US, "%.0f", bearing360)}° ($directionText)
         """.trimIndent()
+    }
+
+    private fun requestFreshLocationUpdate() {
+        if (!allPermissionsGranted()) return
+
+        val listener = android.location.LocationListener { location ->
+            cachedUserLocation = location
+            runOnUiThread { updateLocationAndStationInfo() }
+        }
+
+        try {
+            if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                locationManager.requestSingleUpdate(LocationManager.GPS_PROVIDER, listener, mainLooper)
+            }
+        } catch (_: Exception) {
+        }
+
+        try {
+            if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                locationManager.requestSingleUpdate(LocationManager.NETWORK_PROVIDER, listener, mainLooper)
+            }
+        } catch (_: Exception) {
+        }
     }
 
     private fun findBestLastKnownLocation(): Location? {
@@ -443,7 +501,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun displayResults(polaris: Star, result: LatitudeResult) {
+    private fun displayResults(reference: Star, result: LatitudeResult, referenceName: String) {
         val resultsText = """
             SONUCLAR
 
@@ -451,10 +509,11 @@ class MainActivity : AppCompatActivity() {
             HATA PAYI: +/-${result.errorMargin}
             ARALIK: ${result.lowerBound} -> ${result.upperBound}
 
-            Polaris yuksekligi: ${result.altitude}
-            X: ${polaris.x.toInt()} px
-            Y: ${polaris.y.toInt()} px
-            Parlaklik: ${polaris.brightness.toInt()}
+            Referans: $referenceName
+            Referans yuksekligi: ${result.altitude}
+            X: ${reference.x.toInt()} px
+            Y: ${reference.y.toInt()} px
+            Parlaklik: ${reference.brightness.toInt()}
         """.trimIndent()
 
         latitudeResultTextView.text = resultsText
