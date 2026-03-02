@@ -61,6 +61,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var polarisFinder: PolarisFinder
     private lateinit var southernCrossFinder: SouthernCrossFinder
     private lateinit var latitudeSolver: LatitudeSolver
+    private lateinit var skyPatternMatcher: SkyPatternMatcher
 
     private lateinit var cameraExecutor: ExecutorService
     private var camera: Camera? = null
@@ -104,6 +105,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         stations = loadStationsFromAssets()
+        skyPatternMatcher = loadSkyPatternMatcher()
 
         initializeUI()
         initializeModules()
@@ -282,7 +284,15 @@ class MainActivity : AppCompatActivity() {
                 Triple(scp, c, "Guney Haci")
             }
 
-            if (confidence < 0.20f) {
+            val month = SkyPatternMatcher.currentMonth()
+            val patternResult = skyPatternMatcher.match(
+                stars = stars,
+                hemisphereMode = if (hemisphereMode == Hemisphere.NORTH) "north" else "south",
+                month = month
+            )
+            val combinedConfidence = (0.6f * confidence + 0.4f * patternResult.confidence).coerceIn(0f, 1f)
+
+            if (combinedConfidence < 0.24f) {
                 runOnUiThread {
                     resultTextView.text = "Guven dusuk, tekrar cek"
                     setProcessingState(false)
@@ -305,18 +315,20 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 resultTextView.text = String.format(
                     Locale.US,
-                    "%s | Tahmini enlem %.4f | Hata +/-%.2f",
+                    "%s | Enlem %.4f | Hata +/-%.2f | Eslesme %.2f",
                     modeName,
                     result.latitude,
-                    result.errorMargin
+                    result.errorMargin,
+                    combinedConfidence
                 )
 
                 val nearest = findNearestStationByLatitude(result.latitude.toDouble())
                 if (nearest != null) {
                     infoTextView.text = String.format(
                         Locale.US,
-                        "Mod: %s | En yakin istasyon: %s",
+                        "Mod: %s | Eslesen yildiz deseni: %s | Istasyon: %s",
                         if (hemisphereMode == Hemisphere.NORTH) "Kuzey" else "Guney",
+                        patternResult.matchedPattern,
                         nearest.name
                     )
                 }
@@ -383,6 +395,16 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             Log.e(TAG, "Istasyon verisi okunamadi", e)
             emptyList()
+        }
+    }
+
+    private fun loadSkyPatternMatcher(): SkyPatternMatcher {
+        return try {
+            val json = assets.open("sky_patterns.json").bufferedReader().use { it.readText() }
+            SkyPatternMatcher.fromJson(json)
+        } catch (e: Exception) {
+            Log.e(TAG, "Sky pattern verisi okunamadi", e)
+            SkyPatternMatcher(emptyList())
         }
     }
 

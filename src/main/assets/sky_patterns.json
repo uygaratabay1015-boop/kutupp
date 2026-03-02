@@ -1,0 +1,30 @@
+﻿[
+  {
+    "name": "UrsaMinor_PolarisRegion",
+    "hemisphere": "north",
+    "triangleRatios": [0.36, 0.62, 0.41, 0.73],
+    "quadRatios": [0.22, 0.48, 0.65],
+    "visibleMonths": [1,2,3,4,5,6,7,8,9,10,11,12]
+  },
+  {
+    "name": "Cassiopeia_Companion",
+    "hemisphere": "north",
+    "triangleRatios": [0.45, 0.78, 0.39, 0.70],
+    "quadRatios": [0.18, 0.44, 0.69],
+    "visibleMonths": [8,9,10,11,12,1,2,3]
+  },
+  {
+    "name": "Crux_Main",
+    "hemisphere": "south",
+    "triangleRatios": [0.31, 0.58, 0.35, 0.66],
+    "quadRatios": [0.14, 0.38, 0.62],
+    "visibleMonths": [3,4,5,6,7,8,9]
+  },
+  {
+    "name": "Crux_CentaurusField",
+    "hemisphere": "south",
+    "triangleRatios": [0.28, 0.54, 0.42, 0.74],
+    "quadRatios": [0.16, 0.41, 0.67],
+    "visibleMonths": [2,3,4,5,6,7,8,9,10]
+  }
+]
