@@ -10,6 +10,8 @@ import android.os.Bundle
 import android.util.Log
 import android.util.Size
 import android.widget.Button
+import android.widget.CheckBox
+import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -26,6 +28,8 @@ import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import java.io.InputStream
+import java.time.LocalDate
+import java.time.format.DateTimeParseException
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -35,6 +39,7 @@ import kotlin.math.atan
 class MainActivity : AppCompatActivity() {
 
     enum class Hemisphere { NORTH, SOUTH }
+    enum class CaptureSource { CAMERA, GALLERY }
 
     companion object {
         private const val TAG = "KutupNav"
@@ -49,6 +54,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var compassStatusTextView: TextView
     private lateinit var infoTextView: TextView
     private lateinit var resultTextView: TextView
+    private lateinit var manualDateCheck: CheckBox
+    private lateinit var manualDateInput: EditText
 
     private lateinit var compass: CompassSensor
     private lateinit var starDetector: StarDetector
@@ -64,6 +71,8 @@ class MainActivity : AppCompatActivity() {
 
     private var hemisphereMode = Hemisphere.NORTH
     private var verticalFov = 60f
+    private var galleryManualDayOfYear: Int? = null
+    private var galleryManualDateLabel: String? = null
 
     private val pickImageLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         if (uri == null) {
@@ -82,7 +91,12 @@ class MainActivity : AppCompatActivity() {
                     }
                     return@execute
                 }
-                processBitmap(bitmap)
+                processBitmap(
+                    bitmap = bitmap,
+                    source = CaptureSource.GALLERY,
+                    manualDayOverride = galleryManualDayOfYear,
+                    manualDateLabel = galleryManualDateLabel
+                )
             } catch (e: Exception) {
                 Log.e(TAG, "Galeri isleme hatasi", e)
                 runOnUiThread {
@@ -127,10 +141,30 @@ class MainActivity : AppCompatActivity() {
         compassStatusTextView = findViewById(R.id.compassStatus)
         infoTextView = findViewById(R.id.azimutuResult)
         resultTextView = findViewById(R.id.latitudeResult)
+        manualDateCheck = findViewById(R.id.manualDateCheck)
+        manualDateInput = findViewById(R.id.manualDateInput)
 
         captureButton.isEnabled = false
         captureButton.setOnClickListener { takePhoto() }
-        galleryButton.setOnClickListener { pickImageLauncher.launch("image/*") }
+        manualDateInput.setText(LocalDate.now().toString())
+        manualDateCheck.setOnCheckedChangeListener { _, isChecked ->
+            manualDateInput.isEnabled = isChecked
+        }
+        galleryButton.setOnClickListener {
+            if (manualDateCheck.isChecked) {
+                val parsed = parseManualDate(manualDateInput.text?.toString().orEmpty())
+                if (parsed == null) {
+                    Toast.makeText(this, "Tarih formati: YYYY-MM-DD", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                galleryManualDayOfYear = parsed.dayOfYear
+                galleryManualDateLabel = parsed.toString()
+            } else {
+                galleryManualDayOfYear = null
+                galleryManualDateLabel = null
+            }
+            pickImageLauncher.launch("image/*")
+        }
         modeButton.setOnClickListener {
             hemisphereMode = if (hemisphereMode == Hemisphere.NORTH) Hemisphere.SOUTH else Hemisphere.NORTH
             updateModeText()
@@ -264,7 +298,12 @@ class MainActivity : AppCompatActivity() {
         cameraExecutor.execute {
             try {
                 val bitmap = imageToBitmap(image)
-                processBitmap(bitmap)
+                processBitmap(
+                    bitmap = bitmap,
+                    source = CaptureSource.CAMERA,
+                    manualDayOverride = null,
+                    manualDateLabel = null
+                )
             } catch (e: Exception) {
                 Log.e(TAG, "Isleme hatasi", e)
                 runOnUiThread {
@@ -277,7 +316,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun processBitmap(bitmap: Bitmap) {
+    private fun processBitmap(
+        bitmap: Bitmap,
+        source: CaptureSource,
+        manualDayOverride: Int?,
+        manualDateLabel: String?
+    ) {
         try {
             val stars = starDetector.detectStars(bitmap)
             if (stars.size < 4) {
@@ -288,7 +332,7 @@ class MainActivity : AppCompatActivity() {
                 return
             }
 
-            val dayOfYear = SkyPatternMatcher.currentDayOfYear()
+            val (dayOfYear, dateLabel) = resolveObservationDate(source, manualDayOverride, manualDateLabel)
             val patternResult = skyPatternMatcher.match(
                 stars = stars,
                 hemisphereMode = if (hemisphereMode == Hemisphere.NORTH) "north" else "south",
@@ -368,9 +412,10 @@ class MainActivity : AppCompatActivity() {
 
                 infoTextView.text = String.format(
                     Locale.US,
-                    "Desen: %s | Katalog %.2f | Gun: %d | Yildiz: %d",
+                    "Desen: %s | Katalog %.2f | Tarih: %s | Gun: %d | Yildiz: %d",
                     patternResult.matchedPattern,
                     catalogConfidence,
+                    dateLabel,
                     dayOfYear,
                     stars.size
                 )
@@ -399,6 +444,32 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             Log.e(TAG, "Sky pattern verisi okunamadi", e)
             SkyPatternMatcher(emptyList())
+        }
+    }
+
+    private fun resolveObservationDate(
+        source: CaptureSource,
+        manualDayOverride: Int?,
+        manualDateLabel: String?
+    ): Pair<Int, String> {
+        return if (source == CaptureSource.CAMERA) {
+            val today = LocalDate.now()
+            Pair(today.dayOfYear, today.toString())
+        } else {
+            if (manualDayOverride != null && manualDateLabel != null) {
+                Pair(manualDayOverride, manualDateLabel)
+            } else {
+                val today = LocalDate.now()
+                Pair(today.dayOfYear, today.toString())
+            }
+        }
+    }
+
+    private fun parseManualDate(raw: String): LocalDate? {
+        return try {
+            LocalDate.parse(raw.trim())
+        } catch (_: DateTimeParseException) {
+            null
         }
     }
 

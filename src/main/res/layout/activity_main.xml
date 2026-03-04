@@ -54,6 +54,39 @@
             android:fontFamily="monospace" />
 
         <LinearLayout
+            android:id="@+id/galleryDatePanel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <CheckBox
+                android:id="@+id/manualDateCheck"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Galeri tarihi"
+                android:textColor="@color/light_gray"
+                android:textSize="11sp" />
+
+            <EditText
+                android:id="@+id/manualDateInput"
+                android:layout_width="0dp"
+                android:layout_height="40dp"
+                android:layout_weight="1"
+                android:layout_marginStart="8dp"
+                android:background="@android:color/transparent"
+                android:hint="YYYY-MM-DD"
+                android:inputType="date"
+                android:maxLines="1"
+                android:textColor="@color/light_gray"
+                android:textColorHint="@color/light_gray"
+                android:textSize="11sp"
+                android:enabled="false"
+                android:fontFamily="monospace" />
+        </LinearLayout>
+
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
