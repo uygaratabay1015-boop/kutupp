@@ -30,9 +30,11 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.exifinterface.media.ExifInterface
 import java.io.InputStream
+import java.time.ZoneId
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
+import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
 import java.util.Locale
 import java.util.concurrent.ExecutorService
@@ -44,6 +46,11 @@ class MainActivity : AppCompatActivity() {
 
     enum class Hemisphere { NORTH, SOUTH }
     enum class CaptureSource { CAMERA, GALLERY }
+    data class OrientationCalibration(
+        val pitchDeg: Float,
+        val azimuthDeg: Float?,
+        val note: String
+    )
 
     companion object {
         private const val TAG = "KutupNav"
@@ -63,6 +70,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var dateModeManual: RadioButton
     private lateinit var manualDateInput: EditText
     private lateinit var manualTimeInput: EditText
+    private lateinit var manualPitchInput: EditText
+    private lateinit var manualAzimuthInput: EditText
+    private lateinit var manualHorizonPercentInput: EditText
 
     private lateinit var compass: CompassSensor
     private lateinit var starDetector: StarDetector
@@ -84,6 +94,8 @@ class MainActivity : AppCompatActivity() {
     private var selectedCameraPitchDeg: Float = 0f
     private var selectedCameraAzimuthDeg: Float? = null
     private var selectedCaptureDateTime: LocalDateTime? = null
+    private var selectedExifDateTime: LocalDateTime? = null
+    private var selectedExifAzimuthDeg: Float? = null
     private var isProcessing = false
 
     private val pickImageLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
@@ -95,6 +107,7 @@ class MainActivity : AppCompatActivity() {
 
         cameraExecutor.execute {
             try {
+                val exifMeta = readExifMetadata(uri)
                 val bitmap = decodeBitmapFromUri(uri)
                 if (bitmap == null) {
                     runOnUiThread {
@@ -104,7 +117,15 @@ class MainActivity : AppCompatActivity() {
                     return@execute
                 }
                 runOnUiThread {
-                    setSelectedPhoto(bitmap, CaptureSource.GALLERY)
+                    selectedExifDateTime = exifMeta.first
+                    selectedExifAzimuthDeg = exifMeta.second
+                    setSelectedPhoto(
+                        bitmap = bitmap,
+                        source = CaptureSource.GALLERY,
+                        capturePitchDeg = null,
+                        captureAzimuthDeg = selectedExifAzimuthDeg,
+                        captureDateTime = selectedExifDateTime ?: nowMinutePrecision()
+                    )
                     setProcessingState(false)
                     Toast.makeText(this, "Foto secildi. HESAPLA'ya bas.", Toast.LENGTH_SHORT).show()
                 }
@@ -158,10 +179,16 @@ class MainActivity : AppCompatActivity() {
         dateModeManual = findViewById(R.id.dateModeManual)
         manualDateInput = findViewById(R.id.manualDateInput)
         manualTimeInput = findViewById(R.id.manualTimeInput)
+        manualPitchInput = findViewById(R.id.manualPitchInput)
+        manualAzimuthInput = findViewById(R.id.manualAzimuthInput)
+        manualHorizonPercentInput = findViewById(R.id.manualHorizonPercentInput)
 
         val now = LocalDateTime.now()
         manualDateInput.setText(now.toLocalDate().toString())
         manualTimeInput.setText(String.format(Locale.US, "%02d:%02d", now.hour, now.minute))
+        manualPitchInput.setText("")
+        manualAzimuthInput.setText("")
+        manualHorizonPercentInput.setText("")
         manualDateInput.isEnabled = false
         manualTimeInput.isEnabled = false
 
@@ -309,7 +336,13 @@ class MainActivity : AppCompatActivity() {
                             val rawBitmap = imageToBitmap(image)
                             val bitmap = rotateBitmap(rawBitmap, image.imageInfo.rotationDegrees)
                             runOnUiThread {
-                                setSelectedPhoto(bitmap, CaptureSource.CAMERA)
+                                setSelectedPhoto(
+                                    bitmap = bitmap,
+                                    source = CaptureSource.CAMERA,
+                                    capturePitchDeg = compass.getPitchDegrees(),
+                                    captureAzimuthDeg = compass.getAzimuth(),
+                                    captureDateTime = nowMinutePrecision()
+                                )
                                 setProcessingState(false)
                                 Toast.makeText(this@MainActivity, "Foto cekildi. HESAPLA'ya bas.", Toast.LENGTH_SHORT).show()
                             }
@@ -334,13 +367,23 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun setSelectedPhoto(bitmap: Bitmap, source: CaptureSource) {
+    private fun setSelectedPhoto(
+        bitmap: Bitmap,
+        source: CaptureSource,
+        capturePitchDeg: Float? = null,
+        captureAzimuthDeg: Float? = null,
+        captureDateTime: LocalDateTime? = null
+    ) {
         selectedBitmap?.recycle()
         selectedBitmap = bitmap
         selectedSource = source
-        selectedCameraPitchDeg = compass.getPitchDegrees()
-        selectedCameraAzimuthDeg = compass.getAzimuth()
-        selectedCaptureDateTime = nowMinutePrecision()
+        selectedCameraPitchDeg = capturePitchDeg ?: compass.getPitchDegrees()
+        selectedCameraAzimuthDeg = captureAzimuthDeg ?: compass.getAzimuth()
+        selectedCaptureDateTime = captureDateTime ?: nowMinutePrecision()
+        if (source == CaptureSource.CAMERA) {
+            selectedExifDateTime = null
+            selectedExifAzimuthDeg = null
+        }
         val srcLabel = if (source == CaptureSource.CAMERA) "KAMERA" else "GALERI"
         infoTextView.text = "Secilen kaynak: $srcLabel | HESAPLA butonuna bas"
         resultTextView.text = "Hazir"
@@ -355,22 +398,28 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val observationDateTime = resolveObservationDateTime()
+        val observationDateTime = resolveObservationDateTime(source)
         if (observationDateTime == null) {
             Toast.makeText(this, "Format: YYYY-MM-DD ve HH:mm", Toast.LENGTH_SHORT).show()
             return
         }
 
-        setProcessingState(true)
-        val pitchForSolve = if (source == CaptureSource.CAMERA) {
-            selectedCameraPitchDeg
-        } else {
-            // Galeri gorselinde cekim anindaki cihaz egimi bilinmedigi icin sabit tut.
-            0f
+        val calibration = resolveOrientationCalibration(source, bitmap.height, verticalFov)
+        if (calibration == null) {
+            Toast.makeText(this, "Galeri icin Pitch veya Ufuk Yuzdesi gir", Toast.LENGTH_LONG).show()
+            return
         }
 
+        setProcessingState(true)
         cameraExecutor.execute {
-            processBitmap(bitmap, source, observationDateTime, pitchForSolve)
+            processBitmap(
+                bitmap = bitmap,
+                source = source,
+                observationDateTime = observationDateTime,
+                pitchForSolve = calibration.pitchDeg,
+                azimuthForSolve = calibration.azimuthDeg,
+                calibrationNote = calibration.note
+            )
         }
     }
 
@@ -378,7 +427,9 @@ class MainActivity : AppCompatActivity() {
         bitmap: Bitmap,
         source: CaptureSource,
         observationDateTime: LocalDateTime,
-        pitchForSolve: Float
+        pitchForSolve: Float,
+        azimuthForSolve: Float?,
+        calibrationNote: String
     ) {
         try {
             val stars = starDetector.detectStars(bitmap)
@@ -412,7 +463,7 @@ class MainActivity : AppCompatActivity() {
                 if (scored.isEmpty()) {
                     Triple(emptyList(), 0f, "Polaris")
                 } else {
-                    val northHeading = selectedCameraAzimuthDeg
+                    val northHeading = azimuthForSolve
                     val rescored = scored.map {
                         val azScore = if (northHeading == null) {
                             0.5f
@@ -449,7 +500,7 @@ class MainActivity : AppCompatActivity() {
                 if (southCandidates.isEmpty()) {
                     Triple(emptyList(), 0f, "Guney Haci")
                 } else {
-                    val southHeading = selectedCameraAzimuthDeg
+                    val southHeading = azimuthForSolve
                     val rescored = southCandidates.map {
                         val azScore = if (southHeading == null) {
                             0.5f
@@ -522,8 +573,9 @@ class MainActivity : AppCompatActivity() {
                 )
                 infoTextView.text = String.format(
                     Locale.US,
-                    "Kaynak: %s | Takimyildiz: %s | Desen: %s | Tarih: %s | Katalog %.2f | Gun %d | Yildiz %d",
+                    "Kaynak: %s | %s | Takimyildiz: %s | Desen: %s | Tarih: %s | Katalog %.2f | Gun %d | Yildiz %d",
                     sourceLabel,
+                    calibrationNote,
                     constellation,
                     patternResult.matchedPattern,
                     dateLabel,
@@ -542,15 +594,73 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun resolveObservationDateTime(): LocalDateTime? {
+    private fun resolveObservationDateTime(source: CaptureSource): LocalDateTime? {
         if (dateModeToday.isChecked) {
-            return selectedCaptureDateTime ?: nowMinutePrecision()
+            return if (source == CaptureSource.GALLERY) {
+                selectedExifDateTime ?: selectedCaptureDateTime ?: nowMinutePrecision()
+            } else {
+                selectedCaptureDateTime ?: nowMinutePrecision()
+            }
         }
         return try {
             val d = LocalDate.parse(manualDateInput.text?.toString().orEmpty().trim())
             val t = LocalTime.parse(manualTimeInput.text?.toString().orEmpty().trim())
             LocalDateTime.of(d, t)
         } catch (_: DateTimeParseException) {
+            null
+        }
+    }
+
+    private fun resolveOrientationCalibration(
+        source: CaptureSource,
+        imageHeight: Int,
+        vFov: Float
+    ): OrientationCalibration? {
+        val manualPitch = parseFloatOrNull(manualPitchInput.text?.toString().orEmpty())
+        val manualAzimuth = parseFloatOrNull(manualAzimuthInput.text?.toString().orEmpty())?.let { normalize360(it) }
+        val horizonPercent = parseFloatOrNull(manualHorizonPercentInput.text?.toString().orEmpty())
+
+        val horizonPitch = horizonPercent?.let {
+            if (it in 0f..100f) {
+                val horizonY = imageHeight * (it / 100f)
+                val centerY = imageHeight / 2f
+                val degPerPixel = vFov / imageHeight.toFloat()
+                (horizonY - centerY) * degPerPixel
+            } else null
+        }
+
+        val pitch = when {
+            manualPitch != null -> manualPitch
+            horizonPitch != null -> horizonPitch
+            source == CaptureSource.CAMERA -> selectedCameraPitchDeg
+            else -> null
+        } ?: return null
+
+        val azimuth = when {
+            manualAzimuth != null -> manualAzimuth
+            source == CaptureSource.CAMERA -> selectedCameraAzimuthDeg
+            else -> selectedExifAzimuthDeg
+        }
+
+        val note = when {
+            manualPitch != null -> "Pitch: Manuel"
+            horizonPitch != null -> "Pitch: Ufuk"
+            source == CaptureSource.CAMERA -> "Pitch: Sensor"
+            else -> "Pitch: Bilinmiyor"
+        }
+        return OrientationCalibration(
+            pitchDeg = pitch.coerceIn(-85f, 85f),
+            azimuthDeg = azimuth,
+            note = note
+        )
+    }
+
+    private fun parseFloatOrNull(raw: String): Float? {
+        val t = raw.trim()
+        if (t.isEmpty()) return null
+        return try {
+            t.replace(',', '.').toFloat()
+        } catch (_: NumberFormatException) {
             null
         }
     }
@@ -711,6 +821,43 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Exception) {
             0
         }
+    }
+
+    private fun readExifMetadata(uri: Uri): Pair<LocalDateTime?, Float?> {
+        return try {
+            contentResolver.openInputStream(uri).use { input ->
+                if (input == null) return Pair(null, null)
+                val exif = ExifInterface(input)
+
+                val dtRaw = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)
+                    ?: exif.getAttribute(ExifInterface.TAG_DATETIME)
+                val dt = parseExifDateTime(dtRaw)
+
+                val az = exif.getAttributeDouble(ExifInterface.TAG_GPS_IMG_DIRECTION, Double.NaN)
+                val azimuth = if (az.isNaN()) null else normalize360(az.toFloat())
+                Pair(dt, azimuth)
+            }
+        } catch (_: Exception) {
+            Pair(null, null)
+        }
+    }
+
+    private fun parseExifDateTime(raw: String?): LocalDateTime? {
+        if (raw.isNullOrBlank()) return null
+        val text = raw.trim()
+        val formatters = listOf(
+            DateTimeFormatter.ofPattern("yyyy:MM:dd HH:mm:ss"),
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"),
+            DateTimeFormatter.ofPattern("yyyy:MM:dd HH:mm"),
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+        )
+        for (f in formatters) {
+            try {
+                return LocalDateTime.parse(text, f)
+            } catch (_: Exception) {
+            }
+        }
+        return null
     }
 
     private fun rotateBitmap(source: Bitmap, degrees: Int): Bitmap {

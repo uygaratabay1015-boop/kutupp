@@ -124,6 +124,71 @@
         </LinearLayout>
 
         <LinearLayout
+            android:id="@+id/calibrationPanel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Kalibrasyon (Galeri icin onerilir)"
+                android:textColor="@color/light_gray"
+                android:textSize="10sp"
+                android:fontFamily="monospace" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <EditText
+                    android:id="@+id/manualPitchInput"
+                    android:layout_width="0dp"
+                    android:layout_height="40dp"
+                    android:layout_weight="1"
+                    android:background="@android:color/transparent"
+                    android:hint="Pitch (derece)"
+                    android:inputType="numberDecimal|numberSigned"
+                    android:maxLines="1"
+                    android:textColor="@color/light_gray"
+                    android:textColorHint="@color/light_gray"
+                    android:textSize="11sp"
+                    android:fontFamily="monospace" />
+
+                <EditText
+                    android:id="@+id/manualAzimuthInput"
+                    android:layout_width="0dp"
+                    android:layout_height="40dp"
+                    android:layout_weight="1"
+                    android:layout_marginStart="8dp"
+                    android:background="@android:color/transparent"
+                    android:hint="Yon/Azimut 0-360"
+                    android:inputType="numberDecimal"
+                    android:maxLines="1"
+                    android:textColor="@color/light_gray"
+                    android:textColorHint="@color/light_gray"
+                    android:textSize="11sp"
+                    android:fontFamily="monospace" />
+            </LinearLayout>
+
+            <EditText
+                android:id="@+id/manualHorizonPercentInput"
+                android:layout_width="match_parent"
+                android:layout_height="40dp"
+                android:background="@android:color/transparent"
+                android:hint="Ufuk Yuzdesi (0-100, opsiyonel)"
+                android:inputType="numberDecimal"
+                android:maxLines="1"
+                android:textColor="@color/light_gray"
+                android:textColorHint="@color/light_gray"
+                android:textSize="11sp"
+                android:fontFamily="monospace" />
+        </LinearLayout>
+
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
