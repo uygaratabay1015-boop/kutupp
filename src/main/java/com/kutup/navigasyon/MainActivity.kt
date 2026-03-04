@@ -537,6 +537,13 @@ class MainActivity : AppCompatActivity() {
             val combinedConfidence =
                 (0.45f * referenceConfidence + 0.30f * patternResult.confidence + 0.25f * catalogConfidence)
                     .coerceIn(0f, 1f)
+            if (hemisphereMode == Hemisphere.SOUTH && referenceConfidence < 0.32f) {
+                runOnUiThread {
+                    resultTextView.text = "Guney Haci geometri guveni dusuk, kalibrasyonu kontrol et"
+                    setProcessingState(false)
+                }
+                return
+            }
             if (combinedConfidence < 0.22f) {
                 runOnUiThread {
                     resultTextView.text = "Guven dusuk, daha net bir gok fotografi dene"

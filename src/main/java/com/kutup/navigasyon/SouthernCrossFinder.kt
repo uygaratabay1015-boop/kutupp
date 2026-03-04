@@ -32,6 +32,8 @@ class SouthernCrossFinder {
         if (bright.size < 4) return emptyList()
 
         val all = mutableListOf<SouthPoleCandidate>()
+        val expectedAxisRatio = 2.35f // Crux uzun/kisa eksen orani
+        val expectedPerp = 0.90f      // eksenler yaklasik dik
 
         for (a in bright.indices) for (b in bright.indices) {
             if (a == b) continue
@@ -48,6 +50,7 @@ class SouthernCrossFinder {
             val midY = (s1.y + s2.y) * 0.5f
 
             var bestPerpScore = 0f
+            var bestRatioScore = 0f
             for (c in bright.indices) for (d in bright.indices) {
                 if (c == d || c == a || c == b || d == a || d == b) continue
                 val c1 = bright[c]
@@ -59,14 +62,20 @@ class SouthernCrossFinder {
 
                 val dot = abs(dx * cdx + dy * cdy) / (len * clen)
                 val perp = (1f - dot).coerceIn(0f, 1f)
+                val perpScore = (1f - abs(perp - expectedPerp)).coerceIn(0f, 1f)
 
                 val cmidX = (c1.x + c2.x) * 0.5f
                 val cmidY = (c1.y + c2.y) * 0.5f
                 val midDist = hypot((cmidX - midX).toDouble(), (cmidY - midY).toDouble()).toFloat()
                 val nearMid = (1f - (midDist / (0.22f * imageHeight))).coerceIn(0f, 1f)
+                val ratio = len / clen
+                val ratioScore = (1f - abs(ratio - expectedAxisRatio) / expectedAxisRatio).coerceIn(0f, 1f)
 
-                val perpScore = 0.6f * perp + 0.4f * nearMid
-                if (perpScore > bestPerpScore) bestPerpScore = perpScore
+                val geometryScore = 0.45f * perpScore + 0.35f * nearMid + 0.20f * ratioScore
+                if (geometryScore > bestPerpScore) {
+                    bestPerpScore = geometryScore
+                    bestRatioScore = ratioScore
+                }
             }
 
             val k = 4.5f
@@ -80,8 +89,16 @@ class SouthernCrossFinder {
                 poleY >= -imageHeight * 0.5f && poleY <= imageHeight * 1.8f
             ) 1f else 0f
 
-            val score = (0.35f * verticality + 0.25f * brightness + 0.20f * inFrameSoft + 0.20f * bestPerpScore)
+            val score = (
+                0.25f * verticality +
+                0.20f * brightness +
+                0.15f * inFrameSoft +
+                0.25f * bestPerpScore +
+                0.15f * bestRatioScore
+            )
                 .coerceIn(0f, 1f)
+
+            if (bestPerpScore < 0.35f) continue
 
             val candidate = SouthPoleCandidate(
                 pole = Star(
