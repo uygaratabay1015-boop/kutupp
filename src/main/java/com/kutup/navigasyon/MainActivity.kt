@@ -16,13 +16,13 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
-import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
@@ -52,6 +52,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var previewView: PreviewView
     private lateinit var captureButton: Button
     private lateinit var galleryButton: Button
+    private lateinit var calculateButton: Button
     private lateinit var modeButton: Button
     private lateinit var compassStatusTextView: TextView
     private lateinit var infoTextView: TextView
@@ -75,15 +76,17 @@ class MainActivity : AppCompatActivity() {
 
     private var hemisphereMode = Hemisphere.NORTH
     private var verticalFov = 60f
-    private var galleryManualDateTime: LocalDateTime? = null
+    private var selectedBitmap: Bitmap? = null
+    private var selectedSource: CaptureSource? = null
+    private var isProcessing = false
 
     private val pickImageLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         if (uri == null) {
             Toast.makeText(this, "Gorsel secilmedi", Toast.LENGTH_SHORT).show()
+            setProcessingState(false)
             return@registerForActivityResult
         }
 
-        setProcessingState(true)
         cameraExecutor.execute {
             try {
                 val bitmap = decodeBitmapFromUri(uri)
@@ -94,11 +97,11 @@ class MainActivity : AppCompatActivity() {
                     }
                     return@execute
                 }
-                processBitmap(
-                    bitmap = bitmap,
-                    source = CaptureSource.GALLERY,
-                    manualDateTimeOverride = galleryManualDateTime
-                )
+                runOnUiThread {
+                    setSelectedPhoto(bitmap, CaptureSource.GALLERY)
+                    setProcessingState(false)
+                    Toast.makeText(this, "Foto secildi. HESAPLA'ya bas.", Toast.LENGTH_SHORT).show()
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Galeri isleme hatasi", e)
                 runOnUiThread {
@@ -131,6 +134,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        selectedBitmap?.recycle()
         compass.stopListening()
         cameraExecutor.shutdown()
     }
@@ -139,6 +143,7 @@ class MainActivity : AppCompatActivity() {
         previewView = findViewById(R.id.previewView)
         captureButton = findViewById(R.id.captureButton)
         galleryButton = findViewById(R.id.galleryButton)
+        calculateButton = findViewById(R.id.calculateButton)
         modeButton = findViewById(R.id.modeButton)
         compassStatusTextView = findViewById(R.id.compassStatus)
         infoTextView = findViewById(R.id.azimutuResult)
@@ -148,11 +153,12 @@ class MainActivity : AppCompatActivity() {
         manualDateInput = findViewById(R.id.manualDateInput)
         manualTimeInput = findViewById(R.id.manualTimeInput)
 
-        captureButton.isEnabled = false
-        captureButton.setOnClickListener { takePhoto() }
         val now = LocalDateTime.now()
         manualDateInput.setText(now.toLocalDate().toString())
         manualTimeInput.setText(String.format(Locale.US, "%02d:%02d", now.hour, now.minute))
+        manualDateInput.isEnabled = false
+        manualTimeInput.isEnabled = false
+
         dateModeToday.setOnCheckedChangeListener { _, checked ->
             if (checked) {
                 manualDateInput.isEnabled = false
@@ -165,22 +171,16 @@ class MainActivity : AppCompatActivity() {
                 manualTimeInput.isEnabled = true
             }
         }
+
+        captureButton.isEnabled = false
+        calculateButton.isEnabled = false
+
+        captureButton.setOnClickListener { takePhotoForSelection() }
         galleryButton.setOnClickListener {
-            if (dateModeManual.isChecked) {
-                val parsed = parseManualDateTime(
-                    rawDate = manualDateInput.text?.toString().orEmpty(),
-                    rawTime = manualTimeInput.text?.toString().orEmpty()
-                )
-                if (parsed == null) {
-                    Toast.makeText(this, "Format: YYYY-MM-DD ve HH:mm", Toast.LENGTH_SHORT).show()
-                    return@setOnClickListener
-                }
-                galleryManualDateTime = parsed
-            } else {
-                galleryManualDateTime = null
-            }
+            setProcessingState(true)
             pickImageLauncher.launch("image/*")
         }
+        calculateButton.setOnClickListener { onCalculatePressed() }
         modeButton.setOnClickListener {
             hemisphereMode = if (hemisphereMode == Hemisphere.NORTH) Hemisphere.SOUTH else Hemisphere.NORTH
             updateModeText()
@@ -212,11 +212,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateModeText() {
         modeButton.text = if (hemisphereMode == Hemisphere.NORTH) "MOD: KUZEY" else "MOD: GUNEY"
-        infoTextView.text = if (hemisphereMode == Hemisphere.NORTH) {
-            "Mod: Kuzey (Polaris + desen eslestirme)"
-        } else {
-            "Mod: Guney (Guney Haci + desen eslestirme)"
-        }
     }
 
     private fun allPermissionsGranted(): Boolean {
@@ -260,6 +255,7 @@ class MainActivity : AppCompatActivity() {
                 camera = cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture)
                 updateVerticalFovFromCamera(camera)
                 captureButton.isEnabled = true
+                updateCalculateButton()
             } catch (exc: Exception) {
                 Log.e(TAG, "Kamera baslatma hatasi", exc)
                 captureButton.isEnabled = false
@@ -278,15 +274,14 @@ class MainActivity : AppCompatActivity() {
             val focalMm = focalLengths?.firstOrNull()
             if (sensorHeightMm != null && focalMm != null && sensorHeightMm > 0f && focalMm > 0f) {
                 val fovRad = 2.0 * atan((sensorHeightMm / (2.0 * focalMm)).toDouble())
-                val fovDeg = Math.toDegrees(fovRad).toFloat().coerceIn(25f, 100f)
-                verticalFov = fovDeg
+                verticalFov = Math.toDegrees(fovRad).toFloat().coerceIn(25f, 100f)
             }
         } catch (e: Exception) {
             Log.w(TAG, "Kamera FOV metadata okunamadi, varsayilan 60 derece kullaniliyor", e)
         }
     }
 
-    private fun takePhoto() {
+    private fun takePhotoForSelection() {
         val localImageCapture = imageCapture
         if (localImageCapture == null) {
             Toast.makeText(this, "Kamera hazir degil", Toast.LENGTH_SHORT).show()
@@ -298,7 +293,24 @@ class MainActivity : AppCompatActivity() {
             ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageCapturedCallback() {
                 override fun onCaptureSuccess(image: ImageProxy) {
-                    processImage(image)
+                    cameraExecutor.execute {
+                        try {
+                            val bitmap = imageToBitmap(image)
+                            runOnUiThread {
+                                setSelectedPhoto(bitmap, CaptureSource.CAMERA)
+                                setProcessingState(false)
+                                Toast.makeText(this@MainActivity, "Foto cekildi. HESAPLA'ya bas.", Toast.LENGTH_SHORT).show()
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Kamera fotografi hazirlama hatasi", e)
+                            runOnUiThread {
+                                Toast.makeText(this@MainActivity, "Fotograf hazirlanamadi", Toast.LENGTH_SHORT).show()
+                                setProcessingState(false)
+                            }
+                        } finally {
+                            image.close()
+                        }
+                    }
                 }
 
                 override fun onError(exc: ImageCaptureException) {
@@ -310,32 +322,37 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun processImage(image: ImageProxy) {
+    private fun setSelectedPhoto(bitmap: Bitmap, source: CaptureSource) {
+        selectedBitmap?.recycle()
+        selectedBitmap = bitmap
+        selectedSource = source
+        val srcLabel = if (source == CaptureSource.CAMERA) "KAMERA" else "GALERI"
+        infoTextView.text = "Secilen kaynak: $srcLabel | HESAPLA butonuna bas"
+        resultTextView.text = "Hazir"
+        updateCalculateButton()
+    }
+
+    private fun onCalculatePressed() {
+        val bitmap = selectedBitmap
+        val source = selectedSource
+        if (bitmap == null || source == null) {
+            Toast.makeText(this, "Once fotograf cek veya galeriden sec", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val observationDateTime = resolveObservationDateTime()
+        if (observationDateTime == null) {
+            Toast.makeText(this, "Format: YYYY-MM-DD ve HH:mm", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        setProcessingState(true)
         cameraExecutor.execute {
-            try {
-                val bitmap = imageToBitmap(image)
-                processBitmap(
-                    bitmap = bitmap,
-                    source = CaptureSource.CAMERA,
-                    manualDateTimeOverride = null
-                )
-            } catch (e: Exception) {
-                Log.e(TAG, "Isleme hatasi", e)
-                runOnUiThread {
-                    setProcessingState(false)
-                    Toast.makeText(this, "Fotograf islenemedi", Toast.LENGTH_SHORT).show()
-                }
-            } finally {
-                image.close()
-            }
+            processBitmap(bitmap, source, observationDateTime)
         }
     }
 
-    private fun processBitmap(
-        bitmap: Bitmap,
-        source: CaptureSource,
-        manualDateTimeOverride: LocalDateTime?
-    ) {
+    private fun processBitmap(bitmap: Bitmap, source: CaptureSource, observationDateTime: LocalDateTime) {
         try {
             val stars = starDetector.detectStars(bitmap)
             if (stars.size < 4) {
@@ -346,7 +363,17 @@ class MainActivity : AppCompatActivity() {
                 return
             }
 
-            val (dayOfYearFloat, dayOfYearInt, dateLabel) = resolveObservationDate(source, manualDateTimeOverride)
+            val dayFraction = (observationDateTime.hour * 60 + observationDateTime.minute).toFloat() / 1440f
+            val dayOfYearFloat = observationDateTime.dayOfYear.toFloat() + dayFraction
+            val dayOfYearInt = observationDateTime.dayOfYear
+            val dateLabel = String.format(
+                Locale.US,
+                "%s %02d:%02d",
+                observationDateTime.toLocalDate().toString(),
+                observationDateTime.hour,
+                observationDateTime.minute
+            )
+
             val patternResult = skyPatternMatcher.match(
                 stars = stars,
                 hemisphereMode = if (hemisphereMode == Hemisphere.NORTH) "north" else "south",
@@ -397,7 +424,7 @@ class MainActivity : AppCompatActivity() {
                     .coerceIn(0f, 1f)
             if (combinedConfidence < 0.22f) {
                 runOnUiThread {
-                    resultTextView.text = "Guven dusuk, telefonu sabitleyip tekrar cek"
+                    resultTextView.text = "Guven dusuk, daha net bir gok fotografi dene"
                     setProcessingState(false)
                 }
                 return
@@ -414,6 +441,7 @@ class MainActivity : AppCompatActivity() {
 
             runOnUiThread {
                 val hemisphereLabel = if (result.latitude >= 0f) "K" else "G"
+                val sourceLabel = if (source == CaptureSource.CAMERA) "KAMERA" else "GALERI"
                 resultTextView.text = String.format(
                     Locale.US,
                     "%s | Enlem %.4f°%s | Hata +/-%.2f° | Guven %.2f",
@@ -423,17 +451,15 @@ class MainActivity : AppCompatActivity() {
                     result.errorMargin,
                     combinedConfidence
                 )
-
                 infoTextView.text = String.format(
                     Locale.US,
-                    "Desen: %s | Katalog %.2f | Tarih: %s | Gun: %d | Yildiz: %d",
-                    patternResult.matchedPattern,
-                    catalogConfidence,
+                    "Kaynak: %s | Tarih: %s | Katalog %.2f | Gun %d | Yildiz %d",
+                    sourceLabel,
                     dateLabel,
+                    catalogConfidence,
                     dayOfYearInt,
                     stars.size
                 )
-
                 setProcessingState(false)
             }
         } catch (e: Exception) {
@@ -445,10 +471,31 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun setProcessingState(isProcessing: Boolean) {
-        captureButton.isEnabled = !isProcessing && imageCapture != null
-        galleryButton.isEnabled = !isProcessing
-        modeButton.isEnabled = !isProcessing
+    private fun resolveObservationDateTime(): LocalDateTime? {
+        if (dateModeToday.isChecked) return LocalDateTime.now()
+        return try {
+            val d = LocalDate.parse(manualDateInput.text?.toString().orEmpty().trim())
+            val t = LocalTime.parse(manualTimeInput.text?.toString().orEmpty().trim())
+            LocalDateTime.of(d, t)
+        } catch (_: DateTimeParseException) {
+            null
+        }
+    }
+
+    private fun setProcessingState(processing: Boolean) {
+        isProcessing = processing
+        captureButton.isEnabled = !processing && imageCapture != null
+        galleryButton.isEnabled = !processing
+        modeButton.isEnabled = !processing
+        dateModeToday.isEnabled = !processing
+        dateModeManual.isEnabled = !processing
+        manualDateInput.isEnabled = !processing && dateModeManual.isChecked
+        manualTimeInput.isEnabled = !processing && dateModeManual.isChecked
+        updateCalculateButton()
+    }
+
+    private fun updateCalculateButton() {
+        calculateButton.isEnabled = !isProcessing && selectedBitmap != null
     }
 
     private fun loadSkyPatternMatcher(): SkyPatternMatcher {
@@ -458,31 +505,6 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             Log.e(TAG, "Sky pattern verisi okunamadi", e)
             SkyPatternMatcher(emptyList())
-        }
-    }
-
-    private fun resolveObservationDate(
-        source: CaptureSource,
-        manualDateTimeOverride: LocalDateTime?
-    ): Triple<Float, Int, String> {
-        val dt = if (source == CaptureSource.CAMERA) {
-            LocalDateTime.now()
-        } else {
-            manualDateTimeOverride ?: LocalDateTime.now()
-        }
-        val dayFraction = (dt.hour * 60 + dt.minute).toFloat() / 1440f
-        val dayOfYearFloat = dt.dayOfYear.toFloat() + dayFraction
-        val label = String.format(Locale.US, "%s %02d:%02d", dt.toLocalDate().toString(), dt.hour, dt.minute)
-        return Triple(dayOfYearFloat, dt.dayOfYear, label)
-    }
-
-    private fun parseManualDateTime(rawDate: String, rawTime: String): LocalDateTime? {
-        return try {
-            val d = LocalDate.parse(rawDate.trim())
-            val t = LocalTime.parse(rawTime.trim())
-            LocalDateTime.of(d, t)
-        } catch (_: DateTimeParseException) {
-            null
         }
     }
 
