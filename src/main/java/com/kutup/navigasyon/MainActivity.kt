@@ -56,6 +56,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var southernCrossFinder: SouthernCrossFinder
     private lateinit var latitudeSolver: LatitudeSolver
     private lateinit var skyPatternMatcher: SkyPatternMatcher
+    private lateinit var starCatalogMatcher: StarCatalogMatcher
 
     private lateinit var cameraExecutor: ExecutorService
     private var camera: Camera? = null
@@ -97,6 +98,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         skyPatternMatcher = loadSkyPatternMatcher()
+        starCatalogMatcher = loadStarCatalogMatcher()
 
         initializeUI()
         initializeModules()
@@ -298,7 +300,8 @@ class MainActivity : AppCompatActivity() {
                 if (scored.isEmpty()) {
                     Triple(emptyList(), 0f, "Polaris")
                 } else {
-                    val ys = scored.map { it.star.y to (0.15f + it.totalScore).coerceIn(0.15f, 1f) }
+                    val clustered = clusterNorthCandidates(scored.map { it.star.y to it.totalScore }, bitmap.height)
+                    val ys = clustered.map { it.first to (0.15f + it.second).coerceIn(0.15f, 1f) }
                     val conf = scored.take(3).map { it.totalScore }.average().toFloat()
                     Triple(ys, conf, "Polaris")
                 }
@@ -312,7 +315,8 @@ class MainActivity : AppCompatActivity() {
                 if (southCandidates.isEmpty()) {
                     Triple(emptyList(), 0f, "Guney Haci")
                 } else {
-                    val ys = southCandidates.map { it.pole.y to (0.15f + it.score).coerceIn(0.15f, 1f) }
+                    val clustered = clusterSouthCandidates(southCandidates.map { it.pole.y to it.score }, bitmap.height)
+                    val ys = clustered.map { it.first to (0.15f + it.second).coerceIn(0.15f, 1f) }
                     val conf = southCandidates.take(3).map { it.score }.average().toFloat()
                     Triple(ys, conf, "Guney Haci")
                 }
@@ -326,7 +330,13 @@ class MainActivity : AppCompatActivity() {
                 return
             }
 
-            val combinedConfidence = (0.55f * referenceConfidence + 0.45f * patternResult.confidence).coerceIn(0f, 1f)
+            val catalogConfidence = starCatalogMatcher.match(
+                stars = stars,
+                hemisphereMode = if (hemisphereMode == Hemisphere.NORTH) "north" else "south"
+            )
+            val combinedConfidence =
+                (0.45f * referenceConfidence + 0.30f * patternResult.confidence + 0.25f * catalogConfidence)
+                    .coerceIn(0f, 1f)
             if (combinedConfidence < 0.22f) {
                 runOnUiThread {
                     resultTextView.text = "Guven dusuk, telefonu sabitleyip tekrar cek"
@@ -358,8 +368,9 @@ class MainActivity : AppCompatActivity() {
 
                 infoTextView.text = String.format(
                     Locale.US,
-                    "Desen: %s | Gun: %d | Yildiz: %d",
+                    "Desen: %s | Katalog %.2f | Gun: %d | Yildiz: %d",
                     patternResult.matchedPattern,
+                    catalogConfidence,
                     dayOfYear,
                     stars.size
                 )
@@ -389,6 +400,34 @@ class MainActivity : AppCompatActivity() {
             Log.e(TAG, "Sky pattern verisi okunamadi", e)
             SkyPatternMatcher(emptyList())
         }
+    }
+
+    private fun loadStarCatalogMatcher(): StarCatalogMatcher {
+        return try {
+            val json = assets.open("polar_star_catalog.json").bufferedReader().use { it.readText() }
+            StarCatalogMatcher.fromJson(json)
+        } catch (e: Exception) {
+            Log.e(TAG, "Yildiz katalog verisi okunamadi", e)
+            StarCatalogMatcher.fromJson("[]")
+        }
+    }
+
+    private fun clusterNorthCandidates(candidates: List<Pair<Float, Float>>, imageHeight: Int): List<Pair<Float, Float>> {
+        if (candidates.isEmpty()) return emptyList()
+        val bestY = candidates.maxByOrNull { it.second }!!.first
+        val band = imageHeight * 0.10f
+        val inBand = candidates.filter { abs(it.first - bestY) <= band }
+        val chosen = if (inBand.size >= 3) inBand else candidates.sortedByDescending { it.second }.take(3)
+        return chosen.sortedByDescending { it.second }
+    }
+
+    private fun clusterSouthCandidates(candidates: List<Pair<Float, Float>>, imageHeight: Int): List<Pair<Float, Float>> {
+        if (candidates.isEmpty()) return emptyList()
+        val bestY = candidates.maxByOrNull { it.second }!!.first
+        val band = imageHeight * 0.14f
+        val inBand = candidates.filter { abs(it.first - bestY) <= band }
+        val chosen = if (inBand.size >= 3) inBand else candidates.sortedByDescending { it.second }.take(4)
+        return chosen.sortedByDescending { it.second }
     }
 
     private fun imageToBitmap(image: ImageProxy): Bitmap {

@@ -3,6 +3,7 @@ package com.kutup.navigasyon
 import kotlin.math.abs
 import kotlin.math.pow
 import kotlin.math.sqrt
+import kotlin.math.tan
 
 data class LatitudeResult(
     val latitude: Float,
@@ -31,13 +32,19 @@ class LatitudeSolver {
             WeightedSample(lat.coerceIn(-89.9f, 89.9f), w.coerceAtLeast(0.01f))
         }
 
-        val latitude = weightedMedian(samples)
-        val mad = weightedMedianAbsoluteDeviation(samples, latitude)
+        val initialMedian = weightedMedian(samples)
+        val initialMad = weightedMedianAbsoluteDeviation(samples, initialMedian).coerceAtLeast(0.4f)
+        val inlierWindow = maxOf(2.5f, 2.5f * initialMad)
+        val inliers = samples.filter { abs(it.value - initialMedian) <= inlierWindow }
+        val stableSamples = if (inliers.size >= 3) inliers else samples
 
-        val fovUncertainty = 1.2f
-        val tiltUncertainty = 1.8f
-        val sampleSpread = mad * 1.35f
-        val totalError = sqrt(fovUncertainty.pow(2) + tiltUncertainty.pow(2) + sampleSpread.pow(2)).coerceIn(1.2f, 12f)
+        val latitude = weightedMedian(stableSamples)
+        val mad = weightedMedianAbsoluteDeviation(stableSamples, latitude)
+
+        val fovUncertainty = 0.9f
+        val tiltUncertainty = 1.2f
+        val sampleSpread = mad * 0.95f
+        val totalError = sqrt(fovUncertainty.pow(2) + tiltUncertainty.pow(2) + sampleSpread.pow(2)).coerceIn(0.9f, 8f)
 
         val altitudeAtMedian = if (southernHemisphere) abs(latitude) else latitude
 
@@ -59,8 +66,22 @@ class LatitudeSolver {
         val centerY = imageHeight / 2f
         val pixelOffset = centerY - y
         val degreesPerPixel = verticalFov / imageHeight
-        val opticalAltitude = pixelOffset * degreesPerPixel
-        return opticalAltitude + cameraPitchDeg
+        val apparentAltitude = opticalAltitude(pixelOffset, degreesPerPixel, cameraPitchDeg)
+        val refraction = atmosphericRefractionDegrees(apparentAltitude)
+        return apparentAltitude - refraction
+    }
+
+    private fun opticalAltitude(pixelOffset: Float, degreesPerPixel: Float, cameraPitchDeg: Float): Float {
+        return (pixelOffset * degreesPerPixel) + cameraPitchDeg
+    }
+
+    // Bennett approximation (arcminutes) converted to degrees.
+    private fun atmosphericRefractionDegrees(apparentAltitude: Float): Float {
+        if (apparentAltitude < -1f || apparentAltitude > 85f) return 0f
+        val denom = tan(Math.toRadians((apparentAltitude + 10.3f / (apparentAltitude + 5.11f)).toDouble()))
+        if (denom == 0.0) return 0f
+        val arcMinutes = 1.02 / denom
+        return (arcMinutes / 60.0).toFloat().coerceIn(0f, 1.2f)
     }
 
     private data class WeightedSample(val value: Float, val weight: Float)
