@@ -23,7 +23,7 @@ data class SkyPatternTemplate(
 
 class SkyPatternMatcher(private val templates: List<SkyPatternTemplate>) {
 
-    fun match(stars: List<Star>, hemisphereMode: String, dayOfYear: Int): PatternMatchResult {
+    fun match(stars: List<Star>, hemisphereMode: String, dayOfYear: Float): PatternMatchResult {
         if (stars.size < 4 || templates.isEmpty()) return PatternMatchResult(0f, "-")
 
         val top = stars.sortedByDescending { it.brightness }.take(20)
@@ -106,15 +106,15 @@ class SkyPatternMatcher(private val templates: List<SkyPatternTemplate>) {
         return (sum / expected.size.toFloat()).coerceIn(0f, 1f)
     }
 
-    private fun seasonScore(template: SkyPatternTemplate, dayOfYear: Int): Float {
+    private fun seasonScore(template: SkyPatternTemplate, dayOfYear: Float): Float {
         val peak = template.peakDay
         if (peak != null) {
-            val distance = circularDayDistance(dayOfYear, peak)
+            val distance = circularDayDistance(dayOfYear, peak.toFloat())
             val spread = template.daySpread.coerceAtLeast(15)
-            return (1f - (distance.toFloat() / spread.toFloat())).coerceIn(0f, 1f)
+            return (1f - (distance / spread.toFloat())).coerceIn(0f, 1f)
         }
 
-        val month = dayToMonth(dayOfYear)
+        val month = dayToMonth(dayOfYear.toInt())
         return if (template.visibleMonths.contains(month)) 1f else 0.2f
     }
 
@@ -124,8 +124,8 @@ class SkyPatternMatcher(private val templates: List<SkyPatternTemplate>) {
         return c.get(Calendar.MONTH) + 1
     }
 
-    private fun circularDayDistance(a: Int, b: Int): Int {
-        val days = 366
+    private fun circularDayDistance(a: Float, b: Float): Float {
+        val days = 366f
         val raw = abs(a - b)
         return minOf(raw, days - raw)
     }

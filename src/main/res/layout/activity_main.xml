@@ -58,32 +58,69 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="6dp"
-            android:orientation="horizontal"
-            android:gravity="center_vertical">
+            android:orientation="vertical">
 
-            <CheckBox
-                android:id="@+id/manualDateCheck"
-                android:layout_width="wrap_content"
+            <RadioGroup
+                android:id="@+id/dateModeGroup"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Galeri tarihi"
-                android:textColor="@color/light_gray"
-                android:textSize="11sp" />
+                android:orientation="horizontal">
 
-            <EditText
-                android:id="@+id/manualDateInput"
-                android:layout_width="0dp"
-                android:layout_height="40dp"
-                android:layout_weight="1"
-                android:layout_marginStart="8dp"
-                android:background="@android:color/transparent"
-                android:hint="YYYY-MM-DD"
-                android:inputType="date"
-                android:maxLines="1"
-                android:textColor="@color/light_gray"
-                android:textColorHint="@color/light_gray"
-                android:textSize="11sp"
-                android:enabled="false"
-                android:fontFamily="monospace" />
+                <RadioButton
+                    android:id="@+id/dateModeToday"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Bugun"
+                    android:textColor="@color/light_gray"
+                    android:textSize="11sp"
+                    android:checked="true" />
+
+                <RadioButton
+                    android:id="@+id/dateModeManual"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:text="Elle tarih+saat"
+                    android:textColor="@color/light_gray"
+                    android:textSize="11sp" />
+            </RadioGroup>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <EditText
+                    android:id="@+id/manualDateInput"
+                    android:layout_width="0dp"
+                    android:layout_height="40dp"
+                    android:layout_weight="1"
+                    android:background="@android:color/transparent"
+                    android:hint="YYYY-MM-DD"
+                    android:inputType="date"
+                    android:maxLines="1"
+                    android:textColor="@color/light_gray"
+                    android:textColorHint="@color/light_gray"
+                    android:textSize="11sp"
+                    android:enabled="false"
+                    android:fontFamily="monospace" />
+
+                <EditText
+                    android:id="@+id/manualTimeInput"
+                    android:layout_width="90dp"
+                    android:layout_height="40dp"
+                    android:layout_marginStart="8dp"
+                    android:background="@android:color/transparent"
+                    android:hint="HH:mm"
+                    android:inputType="time"
+                    android:maxLines="1"
+                    android:textColor="@color/light_gray"
+                    android:textColorHint="@color/light_gray"
+                    android:textSize="11sp"
+                    android:enabled="false"
+                    android:fontFamily="monospace" />
+            </LinearLayout>
         </LinearLayout>
 
         <LinearLayout
