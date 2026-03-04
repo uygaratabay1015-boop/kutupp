@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.hardware.camera2.CameraCharacteristics
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
@@ -19,6 +20,7 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
@@ -28,6 +30,7 @@ import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlin.math.abs
+import kotlin.math.atan
 
 class MainActivity : AppCompatActivity() {
 
@@ -59,7 +62,7 @@ class MainActivity : AppCompatActivity() {
     private var imageCapture: ImageCapture? = null
 
     private var hemisphereMode = Hemisphere.NORTH
-    private val verticalFov = 60f
+    private var verticalFov = 60f
 
     private val pickImageLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         if (uri == null) {
@@ -203,6 +206,7 @@ class MainActivity : AppCompatActivity() {
             try {
                 cameraProvider.unbindAll()
                 camera = cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture)
+                updateVerticalFovFromCamera(camera)
                 captureButton.isEnabled = true
             } catch (exc: Exception) {
                 Log.e(TAG, "Kamera baslatma hatasi", exc)
@@ -210,6 +214,24 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Kamera baslatilamadi", Toast.LENGTH_SHORT).show()
             }
         }, ContextCompat.getMainExecutor(this))
+    }
+
+    private fun updateVerticalFovFromCamera(cam: Camera?) {
+        if (cam == null) return
+        try {
+            val c2 = Camera2CameraInfo.from(cam.cameraInfo)
+            val sensorSize = c2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+            val focalLengths = c2.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+            val sensorHeightMm = sensorSize?.height
+            val focalMm = focalLengths?.firstOrNull()
+            if (sensorHeightMm != null && focalMm != null && sensorHeightMm > 0f && focalMm > 0f) {
+                val fovRad = 2.0 * atan((sensorHeightMm / (2.0 * focalMm)).toDouble())
+                val fovDeg = Math.toDegrees(fovRad).toFloat().coerceIn(25f, 100f)
+                verticalFov = fovDeg
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Kamera FOV metadata okunamadi, varsayilan 60 derece kullaniliyor", e)
+        }
     }
 
     private fun takePhoto() {
