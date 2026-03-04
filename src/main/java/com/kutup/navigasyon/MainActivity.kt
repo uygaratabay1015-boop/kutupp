@@ -78,6 +78,8 @@ class MainActivity : AppCompatActivity() {
     private var verticalFov = 60f
     private var selectedBitmap: Bitmap? = null
     private var selectedSource: CaptureSource? = null
+    private var selectedCameraPitchDeg: Float = 0f
+    private var selectedCaptureDateTime: LocalDateTime? = null
     private var isProcessing = false
 
     private val pickImageLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
@@ -326,6 +328,8 @@ class MainActivity : AppCompatActivity() {
         selectedBitmap?.recycle()
         selectedBitmap = bitmap
         selectedSource = source
+        selectedCameraPitchDeg = compass.getPitchDegrees()
+        selectedCaptureDateTime = nowMinutePrecision()
         val srcLabel = if (source == CaptureSource.CAMERA) "KAMERA" else "GALERI"
         infoTextView.text = "Secilen kaynak: $srcLabel | HESAPLA butonuna bas"
         resultTextView.text = "Hazir"
@@ -347,12 +351,24 @@ class MainActivity : AppCompatActivity() {
         }
 
         setProcessingState(true)
+        val pitchForSolve = if (source == CaptureSource.CAMERA) {
+            selectedCameraPitchDeg
+        } else {
+            // Galeri gorselinde cekim anindaki cihaz egimi bilinmedigi icin sabit tut.
+            0f
+        }
+
         cameraExecutor.execute {
-            processBitmap(bitmap, source, observationDateTime)
+            processBitmap(bitmap, source, observationDateTime, pitchForSolve)
         }
     }
 
-    private fun processBitmap(bitmap: Bitmap, source: CaptureSource, observationDateTime: LocalDateTime) {
+    private fun processBitmap(
+        bitmap: Bitmap,
+        source: CaptureSource,
+        observationDateTime: LocalDateTime,
+        pitchForSolve: Float
+    ) {
         try {
             val stars = starDetector.detectStars(bitmap)
             if (stars.size < 4) {
@@ -430,18 +446,18 @@ class MainActivity : AppCompatActivity() {
                 return
             }
 
-            val pitch = compass.getPitchDegrees()
             val result = latitudeSolver.calculateLatitudeFromCandidates(
                 candidateYsWithWeight = candidateYs,
                 imageHeight = bitmap.height,
                 verticalFov = verticalFov,
-                cameraPitchDeg = pitch,
+                cameraPitchDeg = pitchForSolve,
                 southernHemisphere = hemisphereMode == Hemisphere.SOUTH
             )
 
             runOnUiThread {
                 val hemisphereLabel = if (result.latitude >= 0f) "K" else "G"
                 val sourceLabel = if (source == CaptureSource.CAMERA) "KAMERA" else "GALERI"
+                val constellation = constellationLabel(patternResult.matchedPattern)
                 resultTextView.text = String.format(
                     Locale.US,
                     "%s | Enlem %.4f°%s | Hata +/-%.2f° | Guven %.2f",
@@ -453,8 +469,10 @@ class MainActivity : AppCompatActivity() {
                 )
                 infoTextView.text = String.format(
                     Locale.US,
-                    "Kaynak: %s | Tarih: %s | Katalog %.2f | Gun %d | Yildiz %d",
+                    "Kaynak: %s | Takimyildiz: %s | Desen: %s | Tarih: %s | Katalog %.2f | Gun %d | Yildiz %d",
                     sourceLabel,
+                    constellation,
+                    patternResult.matchedPattern,
                     dateLabel,
                     catalogConfidence,
                     dayOfYearInt,
@@ -472,13 +490,30 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun resolveObservationDateTime(): LocalDateTime? {
-        if (dateModeToday.isChecked) return LocalDateTime.now()
+        if (dateModeToday.isChecked) {
+            return selectedCaptureDateTime ?: nowMinutePrecision()
+        }
         return try {
             val d = LocalDate.parse(manualDateInput.text?.toString().orEmpty().trim())
             val t = LocalTime.parse(manualTimeInput.text?.toString().orEmpty().trim())
             LocalDateTime.of(d, t)
         } catch (_: DateTimeParseException) {
             null
+        }
+    }
+
+    private fun nowMinutePrecision(): LocalDateTime {
+        val n = LocalDateTime.now()
+        return LocalDateTime.of(n.toLocalDate(), LocalTime.of(n.hour, n.minute))
+    }
+
+    private fun constellationLabel(patternName: String): String {
+        val p = patternName.lowercase(Locale.US)
+        return when {
+            p.contains("ursa") -> "Kucuk Ayi (Ursa Minor)"
+            p.contains("cassiopeia") -> "Cassiopeia"
+            p.contains("crux") -> "Guney Haci (Crux)"
+            else -> "Bilinmiyor"
         }
     }
 
