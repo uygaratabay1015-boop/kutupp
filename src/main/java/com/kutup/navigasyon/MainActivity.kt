@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import android.hardware.camera2.CameraCharacteristics
 import android.net.Uri
 import android.os.Bundle
@@ -27,6 +28,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.exifinterface.media.ExifInterface
 import java.io.InputStream
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -76,9 +78,11 @@ class MainActivity : AppCompatActivity() {
 
     private var hemisphereMode = Hemisphere.NORTH
     private var verticalFov = 60f
+    private var horizontalFov = 70f
     private var selectedBitmap: Bitmap? = null
     private var selectedSource: CaptureSource? = null
     private var selectedCameraPitchDeg: Float = 0f
+    private var selectedCameraAzimuthDeg: Float? = null
     private var selectedCaptureDateTime: LocalDateTime? = null
     private var isProcessing = false
 
@@ -273,10 +277,15 @@ class MainActivity : AppCompatActivity() {
             val sensorSize = c2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
             val focalLengths = c2.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
             val sensorHeightMm = sensorSize?.height
+            val sensorWidthMm = sensorSize?.width
             val focalMm = focalLengths?.firstOrNull()
             if (sensorHeightMm != null && focalMm != null && sensorHeightMm > 0f && focalMm > 0f) {
                 val fovRad = 2.0 * atan((sensorHeightMm / (2.0 * focalMm)).toDouble())
                 verticalFov = Math.toDegrees(fovRad).toFloat().coerceIn(25f, 100f)
+            }
+            if (sensorWidthMm != null && focalMm != null && sensorWidthMm > 0f && focalMm > 0f) {
+                val hFovRad = 2.0 * atan((sensorWidthMm / (2.0 * focalMm)).toDouble())
+                horizontalFov = Math.toDegrees(hFovRad).toFloat().coerceIn(35f, 120f)
             }
         } catch (e: Exception) {
             Log.w(TAG, "Kamera FOV metadata okunamadi, varsayilan 60 derece kullaniliyor", e)
@@ -297,7 +306,8 @@ class MainActivity : AppCompatActivity() {
                 override fun onCaptureSuccess(image: ImageProxy) {
                     cameraExecutor.execute {
                         try {
-                            val bitmap = imageToBitmap(image)
+                            val rawBitmap = imageToBitmap(image)
+                            val bitmap = rotateBitmap(rawBitmap, image.imageInfo.rotationDegrees)
                             runOnUiThread {
                                 setSelectedPhoto(bitmap, CaptureSource.CAMERA)
                                 setProcessingState(false)
@@ -329,6 +339,7 @@ class MainActivity : AppCompatActivity() {
         selectedBitmap = bitmap
         selectedSource = source
         selectedCameraPitchDeg = compass.getPitchDegrees()
+        selectedCameraAzimuthDeg = compass.getAzimuth()
         selectedCaptureDateTime = nowMinutePrecision()
         val srcLabel = if (source == CaptureSource.CAMERA) "KAMERA" else "GALERI"
         infoTextView.text = "Secilen kaynak: $srcLabel | HESAPLA butonuna bas"
@@ -401,9 +412,31 @@ class MainActivity : AppCompatActivity() {
                 if (scored.isEmpty()) {
                     Triple(emptyList(), 0f, "Polaris")
                 } else {
-                    val clustered = clusterNorthCandidates(scored.map { it.star.y to it.totalScore }, bitmap.height)
+                    val northHeading = selectedCameraAzimuthDeg
+                    val rescored = scored.map {
+                        val azScore = if (northHeading == null) {
+                            0.5f
+                        } else {
+                            azimuthConsistencyScore(
+                                starX = it.star.x,
+                                imageWidth = bitmap.width,
+                                headingAzimuthDeg = northHeading,
+                                targetAzimuthDeg = 0f
+                            )
+                        }
+                        val yNorm = (it.star.y / bitmap.height.toFloat()).coerceIn(0f, 1f)
+                        val verticalPenalty = when {
+                            yNorm > 0.90f -> 0.20f
+                            yNorm > 0.78f -> 0.45f
+                            yNorm > 0.65f -> 0.75f
+                            else -> 1.0f
+                        }
+                        val merged = ((0.55f * it.totalScore + 0.45f * azScore) * verticalPenalty).coerceIn(0f, 1f)
+                        it.star.y to merged
+                    }
+                    val clustered = clusterNorthCandidates(rescored, bitmap.height)
                     val ys = clustered.map { it.first to (0.15f + it.second).coerceIn(0.15f, 1f) }
-                    val conf = scored.take(3).map { it.totalScore }.average().toFloat()
+                    val conf = clustered.take(3).map { it.second }.average().toFloat().coerceIn(0f, 1f)
                     Triple(ys, conf, "Polaris")
                 }
             } else {
@@ -416,9 +449,24 @@ class MainActivity : AppCompatActivity() {
                 if (southCandidates.isEmpty()) {
                     Triple(emptyList(), 0f, "Guney Haci")
                 } else {
-                    val clustered = clusterSouthCandidates(southCandidates.map { it.pole.y to it.score }, bitmap.height)
+                    val southHeading = selectedCameraAzimuthDeg
+                    val rescored = southCandidates.map {
+                        val azScore = if (southHeading == null) {
+                            0.5f
+                        } else {
+                            azimuthConsistencyScore(
+                                starX = it.pole.x,
+                                imageWidth = bitmap.width,
+                                headingAzimuthDeg = southHeading,
+                                targetAzimuthDeg = 180f
+                            )
+                        }
+                        val merged = (0.70f * it.score + 0.30f * azScore).coerceIn(0f, 1f)
+                        it.pole.y to merged
+                    }
+                    val clustered = clusterSouthCandidates(rescored, bitmap.height)
                     val ys = clustered.map { it.first to (0.15f + it.second).coerceIn(0.15f, 1f) }
-                    val conf = southCandidates.take(3).map { it.score }.average().toFloat()
+                    val conf = clustered.take(3).map { it.second }.average().toFloat().coerceIn(0f, 1f)
                     Triple(ys, conf, "Guney Haci")
                 }
             }
@@ -457,7 +505,12 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 val hemisphereLabel = if (result.latitude >= 0f) "K" else "G"
                 val sourceLabel = if (source == CaptureSource.CAMERA) "KAMERA" else "GALERI"
-                val constellation = constellationLabel(patternResult.matchedPattern)
+                val constellation = constellationLabel(
+                    patternName = patternResult.matchedPattern,
+                    mode = hemisphereMode,
+                    referenceConfidence = referenceConfidence,
+                    patternConfidence = patternResult.confidence
+                )
                 resultTextView.text = String.format(
                     Locale.US,
                     "%s | Enlem %.4f°%s | Hata +/-%.2f° | Guven %.2f",
@@ -507,13 +560,25 @@ class MainActivity : AppCompatActivity() {
         return LocalDateTime.of(n.toLocalDate(), LocalTime.of(n.hour, n.minute))
     }
 
-    private fun constellationLabel(patternName: String): String {
+    private fun constellationLabel(
+        patternName: String,
+        mode: Hemisphere,
+        referenceConfidence: Float,
+        patternConfidence: Float
+    ): String {
+        if (mode == Hemisphere.NORTH && referenceConfidence >= 0.42f) {
+            return "Kucuk Ayi (Ursa Minor / Polaris)"
+        }
+        if (mode == Hemisphere.SOUTH && referenceConfidence >= 0.42f) {
+            return "Guney Haci (Crux)"
+        }
+
         val p = patternName.lowercase(Locale.US)
         return when {
-            p.contains("ursa") -> "Kucuk Ayi (Ursa Minor)"
-            p.contains("cassiopeia") -> "Cassiopeia"
-            p.contains("crux") -> "Guney Haci (Crux)"
-            else -> "Bilinmiyor"
+            p.contains("ursa") && patternConfidence >= 0.25f -> "Kucuk Ayi (Ursa Minor)"
+            p.contains("cassiopeia") && patternConfidence >= 0.25f -> "Cassiopeia"
+            p.contains("crux") && patternConfidence >= 0.25f -> "Guney Haci (Crux)"
+            else -> if (mode == Hemisphere.NORTH) "Kuzey kutup bolgesi" else "Guney kutup bolgesi"
         }
     }
 
@@ -555,10 +620,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun clusterNorthCandidates(candidates: List<Pair<Float, Float>>, imageHeight: Int): List<Pair<Float, Float>> {
         if (candidates.isEmpty()) return emptyList()
-        val bestY = candidates.maxByOrNull { it.second }!!.first
+        val topHalf = candidates.filter { it.first <= imageHeight * 0.70f }
+        val pool = if (topHalf.isNotEmpty()) topHalf else candidates
+        val bestY = pool.maxByOrNull { it.second }!!.first
         val band = imageHeight * 0.10f
-        val inBand = candidates.filter { abs(it.first - bestY) <= band }
-        val chosen = if (inBand.size >= 3) inBand else candidates.sortedByDescending { it.second }.take(3)
+        val inBand = pool.filter { abs(it.first - bestY) <= band }
+        val chosen = if (inBand.size >= 3) inBand else pool.sortedByDescending { it.second }.take(3)
         return chosen.sortedByDescending { it.second }
     }
 
@@ -623,7 +690,62 @@ class MainActivity : AppCompatActivity() {
 
         contentResolver.openInputStream(uri).use { input: InputStream? ->
             if (input == null) return null
-            return BitmapFactory.decodeStream(input, null, opts)
+            val decoded = BitmapFactory.decodeStream(input, null, opts) ?: return null
+            val rotation = readExifRotation(uri)
+            return rotateBitmap(decoded, rotation)
         }
+    }
+
+    private fun readExifRotation(uri: Uri): Int {
+        return try {
+            contentResolver.openInputStream(uri).use { input ->
+                if (input == null) return 0
+                val exif = ExifInterface(input)
+                when (exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
+                    ExifInterface.ORIENTATION_ROTATE_90 -> 90
+                    ExifInterface.ORIENTATION_ROTATE_180 -> 180
+                    ExifInterface.ORIENTATION_ROTATE_270 -> 270
+                    else -> 0
+                }
+            }
+        } catch (_: Exception) {
+            0
+        }
+    }
+
+    private fun rotateBitmap(source: Bitmap, degrees: Int): Bitmap {
+        if (degrees % 360 == 0) return source
+        val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
+        val rotated = Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
+        if (rotated != source) source.recycle()
+        return rotated
+    }
+
+    private fun azimuthConsistencyScore(
+        starX: Float,
+        imageWidth: Int,
+        headingAzimuthDeg: Float,
+        targetAzimuthDeg: Float
+    ): Float {
+        if (imageWidth <= 0) return 0.5f
+        val centerX = imageWidth / 2f
+        val deltaPx = starX - centerX
+        val degPerPixel = horizontalFov / imageWidth.toFloat()
+        val candidateAz = normalize360(headingAzimuthDeg + deltaPx * degPerPixel)
+        val diff = angularDistance(candidateAz, targetAzimuthDeg)
+        return (1f - (diff / 90f)).coerceIn(0f, 1f)
+    }
+
+    private fun normalize360(deg: Float): Float {
+        var d = deg
+        while (d < 0f) d += 360f
+        while (d >= 360f) d -= 360f
+        return d
+    }
+
+    private fun angularDistance(a: Float, b: Float): Float {
+        var d = abs(a - b)
+        if (d > 180f) d = 360f - d
+        return d
     }
 }
