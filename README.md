@@ -239,3 +239,6 @@ Sorun yaşarsanız:
 ## APK Download
 - See APK_DOWNLOAD.md for direct release link format.
 
+## Method and Sources (Jury)
+- See `METHOD_AND_SOURCES_TR.md` for explainable methodology and references.
+

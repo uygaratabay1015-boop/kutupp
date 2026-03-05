@@ -1,7 +1,9 @@
 package com.kutup.navigasyon
 
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.pow
+import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.math.tan
 
@@ -22,15 +24,55 @@ class LatitudeSolver {
         cameraPitchDeg: Float,
         southernHemisphere: Boolean
     ): LatitudeResult {
-        if (candidateYsWithWeight.isEmpty() || imageHeight <= 0) {
+        val pseudoPoints = candidateYsWithWeight.map { (y, w) ->
+            Triple(0.5f, y, w)
+        }
+        return calculateLatitudeFromCandidatePoints(
+            candidatePointsWithWeight = pseudoPoints,
+            imageWidth = 1,
+            imageHeight = imageHeight,
+            verticalFov = verticalFov,
+            horizontalFov = verticalFov,
+            cameraPitchDeg = cameraPitchDeg,
+            cameraRollDeg = 0f,
+            southernHemisphere = southernHemisphere
+        )
+    }
+
+    fun calculateLatitudeFromCandidatePoints(
+        candidatePointsWithWeight: List<Triple<Float, Float, Float>>,
+        imageWidth: Int,
+        imageHeight: Int,
+        verticalFov: Float,
+        horizontalFov: Float,
+        cameraPitchDeg: Float,
+        cameraRollDeg: Float,
+        southernHemisphere: Boolean
+    ): LatitudeResult {
+        if (candidatePointsWithWeight.isEmpty() || imageHeight <= 0 || imageWidth <= 0) {
             return LatitudeResult(0f, -15f, 15f, 15f, 0f)
         }
 
-        val samples = candidateYsWithWeight.map { (y, w) ->
-            val altitude = yToAltitude(y, imageHeight, verticalFov, cameraPitchDeg)
+        val rawSamples = candidatePointsWithWeight.map { (x, y, w) ->
+            val altitude = pointToAltitude(
+                x = x,
+                y = y,
+                imageWidth = imageWidth,
+                imageHeight = imageHeight,
+                verticalFov = verticalFov,
+                horizontalFov = horizontalFov,
+                cameraPitchDeg = cameraPitchDeg,
+                cameraRollDeg = cameraRollDeg
+            )
             val lat = if (southernHemisphere) -abs(altitude) else altitude
-            WeightedSample(lat.coerceIn(-89.9f, 89.9f), w.coerceAtLeast(0.01f))
+            WeightedSample(lat, w.coerceAtLeast(0.01f))
         }
+        // Asiri ekran-disi projeksiyonlardan gelen yapay kutup sonuclarini ele.
+        val physicallyPlausible = rawSamples.filter { sample ->
+            val a = kotlin.math.abs(sample.value)
+            a in 0f..90.5f
+        }
+        val samples = if (physicallyPlausible.size >= 2) physicallyPlausible else rawSamples
 
         val initialMedian = weightedMedian(samples)
         val initialMad = weightedMedianAbsoluteDeviation(samples, initialMedian).coerceAtLeast(0.4f)
@@ -46,27 +88,40 @@ class LatitudeSolver {
         val sampleSpread = mad * 0.95f
         val totalError = sqrt(fovUncertainty.pow(2) + tiltUncertainty.pow(2) + sampleSpread.pow(2)).coerceIn(0.9f, 8f)
 
-        val altitudeAtMedian = if (southernHemisphere) abs(latitude) else latitude
+        val clippedLat = latitude.coerceIn(-89.9f, 89.9f)
+        val altitudeAtMedian = if (southernHemisphere) abs(clippedLat) else clippedLat
 
         return LatitudeResult(
-            latitude = round(latitude, 3),
-            lowerBound = round(latitude - totalError, 3),
-            upperBound = round(latitude + totalError, 3),
+            latitude = round(clippedLat, 3),
+            lowerBound = round((clippedLat - totalError).coerceIn(-90f, 90f), 3),
+            upperBound = round((clippedLat + totalError).coerceIn(-90f, 90f), 3),
             errorMargin = round(totalError, 2),
             altitude = round(altitudeAtMedian, 3)
         )
     }
 
-    private fun yToAltitude(
+    private fun pointToAltitude(
+        x: Float,
         y: Float,
+        imageWidth: Int,
         imageHeight: Int,
         verticalFov: Float,
-        cameraPitchDeg: Float
+        horizontalFov: Float,
+        cameraPitchDeg: Float,
+        cameraRollDeg: Float
     ): Float {
+        val centerX = imageWidth / 2f
         val centerY = imageHeight / 2f
-        val pixelOffset = centerY - y
-        val degreesPerPixel = verticalFov / imageHeight
-        val apparentAltitude = opticalAltitude(pixelOffset, degreesPerPixel, cameraPitchDeg)
+        val dxPx = x - centerX
+        val dyPx = centerY - y
+        val rollRad = Math.toRadians(cameraRollDeg.toDouble())
+
+        // Ekran koordinatini roll telafili "yukari" eksenine projekte et.
+        val upPx = (dyPx * cos(rollRad) - dxPx * sin(rollRad)).toFloat()
+        val degPerPixelY = verticalFov / imageHeight
+        val degPerPixelX = horizontalFov / imageWidth
+        val meanDegPerPixel = (degPerPixelY + degPerPixelX) * 0.5f
+        val apparentAltitude = opticalAltitude(upPx, meanDegPerPixel, cameraPitchDeg)
         val refraction = atmosphericRefractionDegrees(apparentAltitude)
         return apparentAltitude - refraction
     }

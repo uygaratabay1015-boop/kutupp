@@ -1,4 +1,4 @@
-package com.kutup.navigasyon
+﻿package com.kutup.navigasyon
 
 import android.Manifest
 import android.content.pm.PackageManager
@@ -30,7 +30,6 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.exifinterface.media.ExifInterface
 import java.io.InputStream
-import java.time.ZoneId
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
@@ -48,6 +47,7 @@ class MainActivity : AppCompatActivity() {
     enum class CaptureSource { CAMERA, GALLERY }
     data class OrientationCalibration(
         val pitchDeg: Float,
+        val rollDeg: Float,
         val azimuthDeg: Float?,
         val note: String
     )
@@ -73,6 +73,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var manualPitchInput: EditText
     private lateinit var manualAzimuthInput: EditText
     private lateinit var manualHorizonPercentInput: EditText
+    private lateinit var manualRollInput: EditText
 
     private lateinit var compass: CompassSensor
     private lateinit var starDetector: StarDetector
@@ -92,6 +93,7 @@ class MainActivity : AppCompatActivity() {
     private var selectedBitmap: Bitmap? = null
     private var selectedSource: CaptureSource? = null
     private var selectedCameraPitchDeg: Float = 0f
+    private var selectedCameraRollDeg: Float = 0f
     private var selectedCameraAzimuthDeg: Float? = null
     private var selectedCaptureDateTime: LocalDateTime? = null
     private var selectedExifDateTime: LocalDateTime? = null
@@ -182,6 +184,7 @@ class MainActivity : AppCompatActivity() {
         manualPitchInput = findViewById(R.id.manualPitchInput)
         manualAzimuthInput = findViewById(R.id.manualAzimuthInput)
         manualHorizonPercentInput = findViewById(R.id.manualHorizonPercentInput)
+        manualRollInput = findViewById(R.id.manualRollInput)
 
         val now = LocalDateTime.now()
         manualDateInput.setText(now.toLocalDate().toString())
@@ -189,6 +192,7 @@ class MainActivity : AppCompatActivity() {
         manualPitchInput.setText("")
         manualAzimuthInput.setText("")
         manualHorizonPercentInput.setText("")
+        manualRollInput.setText("")
         manualDateInput.isEnabled = false
         manualTimeInput.isEnabled = false
 
@@ -234,10 +238,11 @@ class MainActivity : AppCompatActivity() {
                 val direction = compass.getCardinalDirection()
                 compassStatusTextView.text = String.format(
                     Locale.US,
-                    "Pusula: %s %.0f° | Pitch %.1f°",
+                    "Pusula: %s %.0f° | Pitch %.1f° | Roll %.1f°",
                     direction,
                     azimuth,
-                    compass.getPitchDegrees()
+                    compass.getPitchDegrees(),
+                    compass.getRollDegrees()
                 )
             }
         }
@@ -340,6 +345,7 @@ class MainActivity : AppCompatActivity() {
                                     bitmap = bitmap,
                                     source = CaptureSource.CAMERA,
                                     capturePitchDeg = compass.getPitchDegrees(),
+                                    captureRollDeg = compass.getRollDegrees(),
                                     captureAzimuthDeg = compass.getAzimuth(),
                                     captureDateTime = nowMinutePrecision()
                                 )
@@ -371,6 +377,7 @@ class MainActivity : AppCompatActivity() {
         bitmap: Bitmap,
         source: CaptureSource,
         capturePitchDeg: Float? = null,
+        captureRollDeg: Float? = null,
         captureAzimuthDeg: Float? = null,
         captureDateTime: LocalDateTime? = null
     ) {
@@ -378,6 +385,7 @@ class MainActivity : AppCompatActivity() {
         selectedBitmap = bitmap
         selectedSource = source
         selectedCameraPitchDeg = capturePitchDeg ?: compass.getPitchDegrees()
+        selectedCameraRollDeg = captureRollDeg ?: compass.getRollDegrees()
         selectedCameraAzimuthDeg = captureAzimuthDeg ?: compass.getAzimuth()
         selectedCaptureDateTime = captureDateTime ?: nowMinutePrecision()
         if (source == CaptureSource.CAMERA) {
@@ -417,6 +425,7 @@ class MainActivity : AppCompatActivity() {
                 source = source,
                 observationDateTime = observationDateTime,
                 pitchForSolve = calibration.pitchDeg,
+                rollForSolve = calibration.rollDeg,
                 azimuthForSolve = calibration.azimuthDeg,
                 calibrationNote = calibration.note
             )
@@ -428,6 +437,7 @@ class MainActivity : AppCompatActivity() {
         source: CaptureSource,
         observationDateTime: LocalDateTime,
         pitchForSolve: Float,
+        rollForSolve: Float,
         azimuthForSolve: Float?,
         calibrationNote: String
     ) {
@@ -457,9 +467,16 @@ class MainActivity : AppCompatActivity() {
                 hemisphereMode = if (hemisphereMode == Hemisphere.NORTH) "north" else "south",
                 dayOfYear = dayOfYearFloat
             )
+            if (patternResult.confidence < 0.18f) {
+                runOnUiThread {
+                    resultTextView.text = "Tarih/desen uyumu dusuk, tarih-saati kontrol et"
+                    setProcessingState(false)
+                }
+                return
+            }
 
-            val (candidateYs, referenceConfidence, modeName) = if (hemisphereMode == Hemisphere.NORTH) {
-                val scored = polarisFinder.scoreStars(stars, bitmap.height).take(8)
+            val (candidatePoints, referenceConfidence, modeName) = if (hemisphereMode == Hemisphere.NORTH) {
+                val scored = polarisFinder.scoreStars(stars, bitmap.height, bitmap.width).take(8)
                 if (scored.isEmpty()) {
                     Triple(emptyList(), 0f, "Polaris")
                 } else {
@@ -483,12 +500,12 @@ class MainActivity : AppCompatActivity() {
                             else -> 1.0f
                         }
                         val merged = ((0.55f * it.totalScore + 0.45f * azScore) * verticalPenalty).coerceIn(0f, 1f)
-                        it.star.y to merged
+                        Triple(it.star.x, it.star.y, merged)
                     }
                     val clustered = clusterNorthCandidates(rescored, bitmap.height)
-                    val ys = clustered.map { it.first to (0.15f + it.second).coerceIn(0.15f, 1f) }
-                    val conf = clustered.take(3).map { it.second }.average().toFloat().coerceIn(0f, 1f)
-                    Triple(ys, conf, "Polaris")
+                    val weighted = clustered.map { Triple(it.first, it.second, (0.15f + it.third).coerceIn(0.15f, 1f)) }
+                    val conf = clustered.take(3).map { it.third }.average().toFloat().coerceIn(0f, 1f)
+                    Triple(weighted, conf, "Polaris")
                 }
             } else {
                 val southCandidates = southernCrossFinder.findSouthCelestialPoleCandidates(
@@ -513,16 +530,16 @@ class MainActivity : AppCompatActivity() {
                             )
                         }
                         val merged = (0.70f * it.score + 0.30f * azScore).coerceIn(0f, 1f)
-                        it.pole.y to merged
+                        Triple(it.pole.x, it.pole.y, merged)
                     }
                     val clustered = clusterSouthCandidates(rescored, bitmap.height)
-                    val ys = clustered.map { it.first to (0.15f + it.second).coerceIn(0.15f, 1f) }
-                    val conf = clustered.take(3).map { it.second }.average().toFloat().coerceIn(0f, 1f)
-                    Triple(ys, conf, "Guney Haci")
+                    val weighted = clustered.map { Triple(it.first, it.second, (0.15f + it.third).coerceIn(0.15f, 1f)) }
+                    val conf = clustered.take(3).map { it.third }.average().toFloat().coerceIn(0f, 1f)
+                    Triple(weighted, conf, "Guney Haci")
                 }
             }
 
-            if (candidateYs.isEmpty()) {
+            if (candidatePoints.isEmpty()) {
                 runOnUiThread {
                     resultTextView.text = "Referans yildiz bulunamadi"
                     setProcessingState(false)
@@ -537,6 +554,24 @@ class MainActivity : AppCompatActivity() {
             val combinedConfidence =
                 (0.45f * referenceConfidence + 0.30f * patternResult.confidence + 0.25f * catalogConfidence)
                     .coerceIn(0f, 1f)
+            if (hemisphereMode == Hemisphere.NORTH) {
+                val p = patternResult.matchedPattern.lowercase(Locale.US)
+                val northPatternOk = p.contains("ursa")
+                if (!northPatternOk && referenceConfidence < 0.48f) {
+                    runOnUiThread {
+                        resultTextView.text = "Kuzeyde Polaris/Kucuk Ayi secilemedi, kadraji yeniden ayarla"
+                        setProcessingState(false)
+                    }
+                    return
+                }
+                if (referenceConfidence < 0.30f) {
+                    runOnUiThread {
+                        resultTextView.text = "Polaris guveni dusuk, net ve daha karanlik gok fotografi dene"
+                        setProcessingState(false)
+                    }
+                    return
+                }
+            }
             if (hemisphereMode == Hemisphere.SOUTH && referenceConfidence < 0.32f) {
                 runOnUiThread {
                     resultTextView.text = "Guney Haci geometri guveni dusuk, kalibrasyonu kontrol et"
@@ -544,7 +579,8 @@ class MainActivity : AppCompatActivity() {
                 }
                 return
             }
-            if (combinedConfidence < 0.22f) {
+            val minCombinedConfidence = if (hemisphereMode == Hemisphere.NORTH) 0.28f else 0.22f
+            if (combinedConfidence < minCombinedConfidence) {
                 runOnUiThread {
                     resultTextView.text = "Guven dusuk, daha net bir gok fotografi dene"
                     setProcessingState(false)
@@ -552,13 +588,24 @@ class MainActivity : AppCompatActivity() {
                 return
             }
 
-            val result = latitudeSolver.calculateLatitudeFromCandidates(
-                candidateYsWithWeight = candidateYs,
+            val result = latitudeSolver.calculateLatitudeFromCandidatePoints(
+                candidatePointsWithWeight = candidatePoints,
+                imageWidth = bitmap.width,
                 imageHeight = bitmap.height,
                 verticalFov = verticalFov,
+                horizontalFov = horizontalFov,
                 cameraPitchDeg = pitchForSolve,
+                cameraRollDeg = rollForSolve,
                 southernHemisphere = hemisphereMode == Hemisphere.SOUTH
             )
+            val nearPole = kotlin.math.abs(result.latitude) >= 88f
+            if (nearPole && (referenceConfidence < 0.55f || catalogConfidence < 0.45f)) {
+                runOnUiThread {
+                    resultTextView.text = "Kutup sonucu guvensiz, kalibrasyon/tarih hatali olabilir"
+                    setProcessingState(false)
+                }
+                return
+            }
 
             runOnUiThread {
                 val hemisphereLabel = if (result.latitude >= 0f) "K" else "G"
@@ -571,7 +618,7 @@ class MainActivity : AppCompatActivity() {
                 )
                 resultTextView.text = String.format(
                     Locale.US,
-                    "%s | Enlem %.4f°%s | Hata +/-%.2f° | Guven %.2f",
+                    "%s | Enlem %.4fÂ°%s | Hata +/-%.2fÂ° | Guven %.2f",
                     modeName,
                     abs(result.latitude),
                     hemisphereLabel,
@@ -624,6 +671,7 @@ class MainActivity : AppCompatActivity() {
         vFov: Float
     ): OrientationCalibration? {
         val manualPitch = parseFloatOrNull(manualPitchInput.text?.toString().orEmpty())
+        val manualRoll = parseFloatOrNull(manualRollInput.text?.toString().orEmpty())
         val manualAzimuth = parseFloatOrNull(manualAzimuthInput.text?.toString().orEmpty())?.let { normalize360(it) }
         val horizonPercent = parseFloatOrNull(manualHorizonPercentInput.text?.toString().orEmpty())
 
@@ -649,14 +697,23 @@ class MainActivity : AppCompatActivity() {
             else -> selectedExifAzimuthDeg
         }
 
+        val roll = when {
+            manualRoll != null -> manualRoll
+            source == CaptureSource.CAMERA -> selectedCameraRollDeg
+            else -> 0f
+        }
+
         val note = when {
+            manualPitch != null && manualRoll != null -> "Pitch/Roll: Manuel"
             manualPitch != null -> "Pitch: Manuel"
+            horizonPitch != null && manualRoll != null -> "Pitch: Ufuk, Roll: Manuel"
             horizonPitch != null -> "Pitch: Ufuk"
-            source == CaptureSource.CAMERA -> "Pitch: Sensor"
-            else -> "Pitch: Bilinmiyor"
+            source == CaptureSource.CAMERA -> "Pitch/Roll: Sensor"
+            else -> "Pitch: Bilinmiyor, Roll: 0"
         }
         return OrientationCalibration(
             pitchDeg = pitch.coerceIn(-85f, 85f),
+            rollDeg = roll.coerceIn(-85f, 85f),
             azimuthDeg = azimuth,
             note = note
         )
@@ -708,6 +765,7 @@ class MainActivity : AppCompatActivity() {
         dateModeManual.isEnabled = !processing
         manualDateInput.isEnabled = !processing && dateModeManual.isChecked
         manualTimeInput.isEnabled = !processing && dateModeManual.isChecked
+        manualRollInput.isEnabled = !processing
         updateCalculateButton()
     }
 
@@ -735,24 +793,30 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun clusterNorthCandidates(candidates: List<Pair<Float, Float>>, imageHeight: Int): List<Pair<Float, Float>> {
+    private fun clusterNorthCandidates(
+        candidates: List<Triple<Float, Float, Float>>,
+        imageHeight: Int
+    ): List<Triple<Float, Float, Float>> {
         if (candidates.isEmpty()) return emptyList()
-        val topHalf = candidates.filter { it.first <= imageHeight * 0.70f }
+        val topHalf = candidates.filter { it.second <= imageHeight * 0.70f }
         val pool = if (topHalf.isNotEmpty()) topHalf else candidates
-        val bestY = pool.maxByOrNull { it.second }!!.first
+        val bestY = pool.maxByOrNull { it.third }!!.second
         val band = imageHeight * 0.10f
-        val inBand = pool.filter { abs(it.first - bestY) <= band }
-        val chosen = if (inBand.size >= 3) inBand else pool.sortedByDescending { it.second }.take(3)
-        return chosen.sortedByDescending { it.second }
+        val inBand = pool.filter { abs(it.second - bestY) <= band }
+        val chosen = if (inBand.size >= 3) inBand else pool.sortedByDescending { it.third }.take(3)
+        return chosen.sortedByDescending { it.third }
     }
 
-    private fun clusterSouthCandidates(candidates: List<Pair<Float, Float>>, imageHeight: Int): List<Pair<Float, Float>> {
+    private fun clusterSouthCandidates(
+        candidates: List<Triple<Float, Float, Float>>,
+        imageHeight: Int
+    ): List<Triple<Float, Float, Float>> {
         if (candidates.isEmpty()) return emptyList()
-        val bestY = candidates.maxByOrNull { it.second }!!.first
+        val bestY = candidates.maxByOrNull { it.third }!!.second
         val band = imageHeight * 0.14f
-        val inBand = candidates.filter { abs(it.first - bestY) <= band }
-        val chosen = if (inBand.size >= 3) inBand else candidates.sortedByDescending { it.second }.take(4)
-        return chosen.sortedByDescending { it.second }
+        val inBand = candidates.filter { abs(it.second - bestY) <= band }
+        val chosen = if (inBand.size >= 3) inBand else candidates.sortedByDescending { it.third }.take(4)
+        return chosen.sortedByDescending { it.third }
     }
 
     private fun imageToBitmap(image: ImageProxy): Bitmap {
@@ -904,3 +968,6 @@ class MainActivity : AppCompatActivity() {
         return d
     }
 }
+
+
+
