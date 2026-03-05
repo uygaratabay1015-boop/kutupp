@@ -116,18 +116,15 @@ class LatitudeSolver {
         val dyPx = centerY - y
         val rollRad = Math.toRadians(cameraRollDeg.toDouble())
 
-        // Ekran koordinatini roll telafili "yukari" eksenine projekte et.
-        val upPx = (dyPx * cos(rollRad) - dxPx * sin(rollRad)).toFloat()
+        // Piksel eksenlerini once aciya cevir, sonra roll telafisini aci uzayinda uygula.
         val degPerPixelY = verticalFov / imageHeight
         val degPerPixelX = horizontalFov / imageWidth
-        val meanDegPerPixel = (degPerPixelY + degPerPixelX) * 0.5f
-        val apparentAltitude = opticalAltitude(upPx, meanDegPerPixel, cameraPitchDeg)
+        val offsetXDeg = dxPx * degPerPixelX
+        val offsetYDeg = dyPx * degPerPixelY
+        val upDeg = (offsetYDeg * cos(rollRad) - offsetXDeg * sin(rollRad)).toFloat()
+        val apparentAltitude = cameraPitchDeg + upDeg
         val refraction = atmosphericRefractionDegrees(apparentAltitude)
         return apparentAltitude - refraction
-    }
-
-    private fun opticalAltitude(pixelOffset: Float, degreesPerPixel: Float, cameraPitchDeg: Float): Float {
-        return (pixelOffset * degreesPerPixel) + cameraPitchDeg
     }
 
     // Bennett approximation (arcminutes) converted to degrees.

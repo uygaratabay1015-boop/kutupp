@@ -413,10 +413,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         val calibration = resolveOrientationCalibration(source, bitmap.height, verticalFov)
-        if (calibration == null) {
-            Toast.makeText(this, "Galeri icin Pitch veya Ufuk Yuzdesi gir", Toast.LENGTH_LONG).show()
-            return
-        }
 
         setProcessingState(true)
         cameraExecutor.execute {
@@ -480,7 +476,7 @@ class MainActivity : AppCompatActivity() {
                 if (scored.isEmpty()) {
                     Triple(emptyList(), 0f, "Polaris")
                 } else {
-                    val northHeading = azimuthForSolve
+                    val northHeading = sanitizedHeadingForHemisphere(azimuthForSolve, Hemisphere.NORTH)
                     val rescored = scored.map {
                         val azScore = if (northHeading == null) {
                             0.5f
@@ -517,7 +513,7 @@ class MainActivity : AppCompatActivity() {
                 if (southCandidates.isEmpty()) {
                     Triple(emptyList(), 0f, "Guney Haci")
                 } else {
-                    val southHeading = azimuthForSolve
+                    val southHeading = sanitizedHeadingForHemisphere(azimuthForSolve, Hemisphere.SOUTH)
                     val rescored = southCandidates.map {
                         val azScore = if (southHeading == null) {
                             0.5f
@@ -669,7 +665,7 @@ class MainActivity : AppCompatActivity() {
         source: CaptureSource,
         imageHeight: Int,
         vFov: Float
-    ): OrientationCalibration? {
+    ): OrientationCalibration {
         val manualPitch = parseFloatOrNull(manualPitchInput.text?.toString().orEmpty())
         val manualRoll = parseFloatOrNull(manualRollInput.text?.toString().orEmpty())
         val manualAzimuth = parseFloatOrNull(manualAzimuthInput.text?.toString().orEmpty())?.let { normalize360(it) }
@@ -688,8 +684,8 @@ class MainActivity : AppCompatActivity() {
             manualPitch != null -> manualPitch
             horizonPitch != null -> horizonPitch
             source == CaptureSource.CAMERA -> selectedCameraPitchDeg
-            else -> null
-        } ?: return null
+            else -> 0f
+        }
 
         val azimuth = when {
             manualAzimuth != null -> manualAzimuth
@@ -709,7 +705,7 @@ class MainActivity : AppCompatActivity() {
             horizonPitch != null && manualRoll != null -> "Pitch: Ufuk, Roll: Manuel"
             horizonPitch != null -> "Pitch: Ufuk"
             source == CaptureSource.CAMERA -> "Pitch/Roll: Sensor"
-            else -> "Pitch: Bilinmiyor, Roll: 0"
+            else -> "Pitch/Roll: Otomatik varsayim (0/0)"
         }
         return OrientationCalibration(
             pitchDeg = pitch.coerceIn(-85f, 85f),
@@ -966,6 +962,14 @@ class MainActivity : AppCompatActivity() {
         var d = abs(a - b)
         if (d > 180f) d = 360f - d
         return d
+    }
+
+    private fun sanitizedHeadingForHemisphere(heading: Float?, mode: Hemisphere): Float? {
+        if (heading == null) return null
+        val target = if (mode == Hemisphere.NORTH) 0f else 180f
+        val diff = angularDistance(heading, target)
+        // Mod ile cok celisen manuel azimutu cezalandirmak yerine yok say.
+        return if (diff <= 70f) heading else null
     }
 }
 
