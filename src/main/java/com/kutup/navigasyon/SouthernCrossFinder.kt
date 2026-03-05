@@ -84,10 +84,7 @@ class SouthernCrossFinder {
 
             val verticality = (1f - (abs(dx) / len)).coerceIn(0f, 1f)
             val brightness = ((s1.brightness + s2.brightness) / (2f * 255f)).coerceIn(0f, 1f)
-            val inFrameSoft = if (
-                poleX >= -imageWidth * 0.5f && poleX <= imageWidth * 1.5f &&
-                poleY >= -imageHeight * 0.5f && poleY <= imageHeight * 1.8f
-            ) 1f else 0f
+            val inFrameSoft = softFrameScore(poleX, poleY, imageWidth.toFloat(), imageHeight.toFloat())
 
             val score = (
                 0.25f * verticality +
@@ -102,8 +99,10 @@ class SouthernCrossFinder {
 
             val candidate = SouthPoleCandidate(
                 pole = Star(
-                    x = poleX.coerceIn(0f, (imageWidth - 1).toFloat()),
-                    y = poleY.coerceIn(0f, (imageHeight - 1).toFloat()),
+                    // Ekran disina tasan kutup noktalarini KESME:
+                    // clamp edilirse enlem tavan degeri yapay olarak duser.
+                    x = poleX,
+                    y = poleY,
                     brightness = maxOf(s1.brightness, s2.brightness)
                 ),
                 score = score
@@ -125,5 +124,19 @@ class SouthernCrossFinder {
         }
 
         return deduped
+    }
+
+    private fun softFrameScore(
+        x: Float,
+        y: Float,
+        width: Float,
+        height: Float
+    ): Float {
+        val centerX = width / 2f
+        val centerY = height / 2f
+        val dx = (x - centerX) / width
+        val dy = (y - centerY) / height
+        val radial = kotlin.math.sqrt(dx * dx + dy * dy)
+        return (1f - radial / 1.4f).coerceIn(0f, 1f)
     }
 }

@@ -882,6 +882,7 @@ class MainActivity : AppCompatActivity() {
         targetAzimuthDeg: Float
     ): Float {
         if (imageWidth <= 0) return 0.5f
+        if (starX < -0.25f * imageWidth || starX > 1.25f * imageWidth) return 0.5f
         val centerX = imageWidth / 2f
         val deltaPx = starX - centerX
         val degPerPixel = horizontalFov / imageWidth.toFloat()
