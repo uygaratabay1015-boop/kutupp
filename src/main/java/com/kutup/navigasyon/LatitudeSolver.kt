@@ -1,7 +1,9 @@
 package com.kutup.navigasyon
 
 import kotlin.math.abs
+import kotlin.math.atan
 import kotlin.math.cos
+import kotlin.math.hypot
 import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -54,7 +56,7 @@ class LatitudeSolver {
         }
 
         val rawSamples = candidatePointsWithWeight.map { (x, y, w) ->
-            val altitude = pointToAltitude(
+            val sample = pointToAltitudeAndStability(
                 x = x,
                 y = y,
                 imageWidth = imageWidth,
@@ -64,8 +66,8 @@ class LatitudeSolver {
                 cameraPitchDeg = cameraPitchDeg,
                 cameraRollDeg = cameraRollDeg
             )
-            val lat = if (southernHemisphere) -abs(altitude) else altitude
-            WeightedSample(lat, w.coerceAtLeast(0.01f))
+            val lat = if (southernHemisphere) -abs(sample.altitude) else sample.altitude
+            WeightedSample(lat, (w * sample.stabilityWeight).coerceAtLeast(0.01f))
         }
         // Asiri ekran-disi projeksiyonlardan gelen yapay kutup sonuclarini ele.
         val physicallyPlausible = rawSamples.filter { sample ->
@@ -100,7 +102,12 @@ class LatitudeSolver {
         )
     }
 
-    private fun pointToAltitude(
+    private data class AltitudeSample(
+        val altitude: Float,
+        val stabilityWeight: Float
+    )
+
+    private fun pointToAltitudeAndStability(
         x: Float,
         y: Float,
         imageWidth: Int,
@@ -109,22 +116,37 @@ class LatitudeSolver {
         horizontalFov: Float,
         cameraPitchDeg: Float,
         cameraRollDeg: Float
-    ): Float {
+    ): AltitudeSample {
+        if (imageWidth <= 0 || imageHeight <= 0) {
+            return AltitudeSample(cameraPitchDeg, 0.2f)
+        }
+
         val centerX = imageWidth / 2f
         val centerY = imageHeight / 2f
-        val dxPx = x - centerX
-        val dyPx = centerY - y
-        val rollRad = Math.toRadians(cameraRollDeg.toDouble())
+        val halfW = imageWidth / 2f
+        val halfH = imageHeight / 2f
+        val clampedVFov = verticalFov.coerceIn(5f, 170f)
+        val clampedHFov = horizontalFov.coerceIn(5f, 170f)
+        val fy = halfH / tan(Math.toRadians((clampedVFov / 2f).toDouble())).toFloat().coerceAtLeast(1e-3f)
+        val fx = halfW / tan(Math.toRadians((clampedHFov / 2f).toDouble())).toFloat().coerceAtLeast(1e-3f)
+        val nx = (x - centerX) / fx
+        val ny = (centerY - y) / fy
 
-        // Piksel eksenlerini once aciya cevir, sonra roll telafisini aci uzayinda uygula.
-        val degPerPixelY = verticalFov / imageHeight
-        val degPerPixelX = horizontalFov / imageWidth
-        val offsetXDeg = dxPx * degPerPixelX
-        val offsetYDeg = dyPx * degPerPixelY
-        val upDeg = (offsetYDeg * cos(rollRad) - offsetXDeg * sin(rollRad)).toFloat()
-        val apparentAltitude = cameraPitchDeg + upDeg
+        val rollRad = Math.toRadians(cameraRollDeg.toDouble())
+        val upComponent = (ny * cos(rollRad) - nx * sin(rollRad)).toFloat()
+
+        // Astrometry.net benzeri gnomonik mantik: goruntu duzleminden isina gecip aciyi atan ile hesapla.
+        val upAngleDeg = Math.toDegrees(atan(upComponent.toDouble())).toFloat()
+        val apparentAltitude = cameraPitchDeg + upAngleDeg
+
         val refraction = atmosphericRefractionDegrees(apparentAltitude)
-        return apparentAltitude - refraction
+        val correctedAltitude = apparentAltitude - refraction
+
+        val radial = hypot(nx.toDouble(), ny.toDouble()).toFloat()
+        val offAxisPenalty = (1f - radial / 1.35f).coerceIn(0.25f, 1f)
+        val highTiltPenalty = (1f - abs(upComponent) / 2.8f).coerceIn(0.4f, 1f)
+        val stability = (offAxisPenalty * highTiltPenalty).coerceIn(0.2f, 1f)
+        return AltitudeSample(correctedAltitude, stability)
     }
 
     // Bennett approximation (arcminutes) converted to degrees.

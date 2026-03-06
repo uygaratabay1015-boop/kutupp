@@ -471,7 +471,7 @@ class MainActivity : AppCompatActivity() {
                 return
             }
 
-            val (candidatePoints, referenceConfidence, modeName) = if (hemisphereMode == Hemisphere.NORTH) {
+            val (baseCandidatePoints, referenceConfidence, modeName) = if (hemisphereMode == Hemisphere.NORTH) {
                 val scored = polarisFinder.scoreStars(stars, bitmap.height, bitmap.width).take(8)
                 if (scored.isEmpty()) {
                     Triple(emptyList(), 0f, "Polaris")
@@ -535,6 +535,24 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
+            val plateSolve = starCatalogMatcher.estimatePolePoint(
+                stars = stars,
+                hemisphereMode = if (hemisphereMode == Hemisphere.NORTH) "north" else "south"
+            )
+            val plateSolveConfidence = plateSolve?.confidence ?: 0f
+            val candidatePoints = baseCandidatePoints.toMutableList()
+            if (plateSolve != null) {
+                val marginX = bitmap.width * 0.30f
+                val marginY = bitmap.height * 0.30f
+                val plausible =
+                    plateSolve.poleX in (-marginX)..(bitmap.width + marginX) &&
+                        plateSolve.poleY in (-marginY)..(bitmap.height + marginY)
+                if (plausible) {
+                    val plateWeight = (0.35f + 0.65f * plateSolveConfidence).coerceIn(0.22f, 1f)
+                    candidatePoints.add(Triple(plateSolve.poleX, plateSolve.poleY, plateWeight))
+                }
+            }
+
             if (candidatePoints.isEmpty()) {
                 runOnUiThread {
                     resultTextView.text = "Referans yildiz bulunamadi"
@@ -548,7 +566,12 @@ class MainActivity : AppCompatActivity() {
                 hemisphereMode = if (hemisphereMode == Hemisphere.NORTH) "north" else "south"
             )
             val combinedConfidence =
-                (0.45f * referenceConfidence + 0.30f * patternResult.confidence + 0.25f * catalogConfidence)
+                (
+                    0.37f * referenceConfidence +
+                        0.25f * patternResult.confidence +
+                        0.20f * catalogConfidence +
+                        0.18f * plateSolveConfidence
+                    )
                     .coerceIn(0f, 1f)
             if (hemisphereMode == Hemisphere.NORTH) {
                 val p = patternResult.matchedPattern.lowercase(Locale.US)
@@ -595,7 +618,7 @@ class MainActivity : AppCompatActivity() {
                 southernHemisphere = hemisphereMode == Hemisphere.SOUTH
             )
             val nearPole = kotlin.math.abs(result.latitude) >= 88f
-            if (nearPole && (referenceConfidence < 0.55f || catalogConfidence < 0.45f)) {
+            if (nearPole && (referenceConfidence < 0.55f || catalogConfidence < 0.45f || plateSolveConfidence < 0.35f)) {
                 runOnUiThread {
                     resultTextView.text = "Kutup sonucu guvensiz, kalibrasyon/tarih hatali olabilir"
                     setProcessingState(false)
@@ -623,13 +646,14 @@ class MainActivity : AppCompatActivity() {
                 )
                 infoTextView.text = String.format(
                     Locale.US,
-                    "Kaynak: %s | %s | Takimyildiz: %s | Desen: %s | Tarih: %s | Katalog %.2f | Gun %d | Yildiz %d",
+                    "Kaynak: %s | %s | Takimyildiz: %s | Desen: %s | Tarih: %s | Katalog %.2f | Plate %.2f | Gun %d | Yildiz %d",
                     sourceLabel,
                     calibrationNote,
                     constellation,
                     patternResult.matchedPattern,
                     dateLabel,
                     catalogConfidence,
+                    plateSolveConfidence,
                     dayOfYearInt,
                     stars.size
                 )
