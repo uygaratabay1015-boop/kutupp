@@ -17,6 +17,7 @@ import android.util.Size
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.RadioButton
 import android.widget.TextView
@@ -87,6 +88,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var manualAzimuthInput: EditText
     private lateinit var manualHorizonPercentInput: EditText
     private lateinit var manualRollInput: EditText
+    private lateinit var horizonPickButton: Button
 
     private lateinit var compass: CompassSensor
     private lateinit var starDetector: StarDetector
@@ -200,6 +202,7 @@ class MainActivity : AppCompatActivity() {
         manualAzimuthInput = findViewById(R.id.manualAzimuthInput)
         manualHorizonPercentInput = findViewById(R.id.manualHorizonPercentInput)
         manualRollInput = findViewById(R.id.manualRollInput)
+        horizonPickButton = findViewById(R.id.horizonPickButton)
 
         val now = LocalDateTime.now()
         manualDateInput.setText(now.toLocalDate().toString())
@@ -231,6 +234,14 @@ class MainActivity : AppCompatActivity() {
         galleryButton.setOnClickListener {
             setProcessingState(true)
             pickImageLauncher.launch("image/*")
+        }
+        horizonPickButton.setOnClickListener {
+            val bmp = selectedBitmap
+            if (bmp == null) {
+                Toast.makeText(this, "Once fotograf sec veya cek", Toast.LENGTH_SHORT).show()
+            } else {
+                showHorizonPickerDialog(bmp)
+            }
         }
         calculateButton.setOnClickListener { onCalculatePressed() }
         modeButton.setOnClickListener {
@@ -870,11 +881,98 @@ class MainActivity : AppCompatActivity() {
         manualDateInput.isEnabled = !processing && dateModeManual.isChecked
         manualTimeInput.isEnabled = !processing && dateModeManual.isChecked
         manualRollInput.isEnabled = !processing
+        horizonPickButton.isEnabled = !processing && selectedBitmap != null
         updateCalculateButton()
     }
 
     private fun updateCalculateButton() {
         calculateButton.isEnabled = !isProcessing && selectedBitmap != null
+    }
+
+    private fun showHorizonPickerDialog(bitmap: Bitmap) {
+        val dialog = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+        val root = FrameLayout(this)
+        val imageView = ImageView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            setBackgroundColor(Color.BLACK)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setImageBitmap(bitmap)
+        }
+
+        var selectedY: Float? = null
+        val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(240, 255, 85, 85)
+            strokeWidth = 4f
+        }
+        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = 36f
+            setShadowLayer(6f, 1f, 1f, Color.BLACK)
+        }
+        val overlay = object : android.view.View(this) {
+            override fun onDraw(canvas: Canvas) {
+                super.onDraw(canvas)
+                val y = selectedY ?: return
+                canvas.drawLine(0f, y, width.toFloat(), y, linePaint)
+                canvas.drawText("Ufuk cizgisi secildi - Dokunarak guncelle", 26f, 56f, textPaint)
+            }
+        }.apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            setOnTouchListener { _, event ->
+                if (event.action == android.view.MotionEvent.ACTION_DOWN ||
+                    event.action == android.view.MotionEvent.ACTION_MOVE
+                ) {
+                    selectedY = event.y.coerceIn(0f, height.toFloat())
+                    invalidate()
+                    true
+                } else if (event.action == android.view.MotionEvent.ACTION_UP) {
+                    selectedY = event.y.coerceIn(0f, height.toFloat())
+                    val horizonPercent = mapTouchYToBitmapPercent(imageView, selectedY!!, bitmap)
+                    if (horizonPercent != null) {
+                        manualHorizonPercentInput.setText(String.format(Locale.US, "%.1f", horizonPercent))
+                        Toast.makeText(
+                            this@MainActivity,
+                            String.format(Locale.US, "Ufuk: %.1f%% kaydedildi", horizonPercent),
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        dialog.dismiss()
+                    } else {
+                        Toast.makeText(this@MainActivity, "Goruntu alanina dokun", Toast.LENGTH_SHORT).show()
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+
+        root.addView(imageView)
+        root.addView(overlay)
+        dialog.setContentView(root)
+        dialog.show()
+    }
+
+    private fun mapTouchYToBitmapPercent(
+        imageView: ImageView,
+        touchY: Float,
+        bitmap: Bitmap
+    ): Float? {
+        val drawable = imageView.drawable ?: return null
+        val values = FloatArray(9)
+        imageView.imageMatrix.getValues(values)
+        val scaleY = values[Matrix.MSCALE_Y]
+        val transY = values[Matrix.MTRANS_Y]
+        val shownHeight = drawable.intrinsicHeight * scaleY
+        if (shownHeight <= 1f) return null
+        if (touchY < transY || touchY > transY + shownHeight) return null
+        val relY = ((touchY - transY) / shownHeight).coerceIn(0f, 1f)
+        return (relY * 100f).coerceIn(0f, 100f)
     }
 
     private fun loadSkyPatternMatcher(): SkyPatternMatcher {
