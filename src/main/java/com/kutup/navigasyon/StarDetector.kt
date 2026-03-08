@@ -25,8 +25,31 @@ class StarDetector {
         bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
 
         val gray = IntArray(width * height)
+        var graySum = 0L
         for (i in pixels.indices) {
-            gray[i] = grayOf(pixels[i])
+            val g = grayOf(pixels[i])
+            gray[i] = g
+            graySum += g.toLong()
+        }
+        val medianBrightness = estimateMedian(gray)
+        val avgBrightness = (graySum.toDouble() / gray.size.toDouble()).toFloat()
+
+        val adaptiveMinLuma = when {
+            medianBrightness < 24f -> 24
+            medianBrightness < 38f -> 34
+            medianBrightness > 95f -> 62
+            else -> 45
+        }
+        val adaptiveProminence = when {
+            medianBrightness < 24f -> 7.5
+            medianBrightness < 38f -> 9.5
+            medianBrightness > 95f -> 15.5
+            else -> 12.0
+        }
+        val backgroundRadius = when {
+            width * height >= 1800 * 1000 -> 5
+            width * height <= 700 * 500 -> 3
+            else -> 4
         }
 
         // Summed-area table for fast local mean.
@@ -40,15 +63,12 @@ class StarDetector {
         }
 
         val rawCandidates = mutableListOf<Star>()
-        val minLuma = 45
-        val minProminence = 12.0
-        val backgroundRadius = 4 // 9x9 window
 
         for (y in backgroundRadius until (height - backgroundRadius)) {
             for (x in backgroundRadius until (width - backgroundRadius)) {
                 val idx = y * width + x
                 val luma = gray[idx]
-                if (luma < minLuma) continue
+                if (luma < adaptiveMinLuma) continue
                 if (!isLocalPeak(gray, width, x, y, luma)) continue
 
                 val x0 = x - backgroundRadius
@@ -59,8 +79,9 @@ class StarDetector {
                 val localMean = sumRect(integral, width, x0, y0, x1, y1).toDouble() / area
                 val prominence = luma - localMean
 
-                if (prominence >= minProminence) {
-                    rawCandidates.add(Star(x.toFloat(), y.toFloat(), luma.toFloat()))
+                val blendedBrightness = (0.62 * luma + 0.38 * localMean).toFloat()
+                if (prominence >= adaptiveProminence && blendedBrightness >= adaptiveMinLuma) {
+                    rawCandidates.add(Star(x.toFloat(), y.toFloat(), blendedBrightness))
                 }
             }
         }
@@ -68,7 +89,11 @@ class StarDetector {
         // Non-maximum suppression: keep brightest star in a small radius.
         val sorted = rawCandidates.sortedByDescending { it.brightness }
         val filtered = mutableListOf<Star>()
-        val radius = 4f
+        val radius = when {
+            medianBrightness < 24f -> 3f
+            avgBrightness > 90f -> 5f
+            else -> 4f
+        }
         val radiusSq = radius * radius
 
         for (candidate in sorted) {
@@ -128,6 +153,23 @@ class StarDetector {
 
     fun getTopStars(stars: List<Star>, count: Int): List<Star> {
         return stars.sortedBy { it.y }.take(count)
+    }
+
+    private fun estimateMedian(gray: IntArray): Float {
+        if (gray.isEmpty()) return 0f
+        val sampled = IntArray(minOf(gray.size, 4096))
+        if (sampled.size == gray.size) {
+            gray.copyInto(sampled)
+        } else {
+            val step = gray.size.toFloat() / sampled.size.toFloat()
+            var idx = 0f
+            for (i in sampled.indices) {
+                sampled[i] = gray[idx.toInt().coerceIn(0, gray.lastIndex)]
+                idx += step
+            }
+        }
+        sampled.sort()
+        return sampled[sampled.size / 2].toFloat()
     }
 
     private fun grayOf(pixel: Int): Int {
