@@ -58,6 +58,12 @@ class MainActivity : AppCompatActivity() {
         val azimuthDeg: Float?,
         val note: String
     )
+    data class SouthPointerRefinement(
+        val refinedPole: Pair<Float, Float>,
+        val pointerA: Star,
+        val pointerB: Star,
+        val score: Float
+    )
 
     companion object {
         private const val TAG = "KutupNav"
@@ -479,6 +485,20 @@ class MainActivity : AppCompatActivity() {
                 }
                 return
             }
+            if (
+                hemisphereMode == Hemisphere.SOUTH &&
+                source == CaptureSource.GALLERY &&
+                calibrationNote.contains("varsayim", ignoreCase = true)
+            ) {
+                runOnUiThread {
+                    resultTextView.text = "Guney modunda galeriden hesap icin Pitch gir veya ufuk yuzdesi ver"
+                    setProcessingState(false)
+                }
+                return
+            }
+
+            var southPointerRefinement: SouthPointerRefinement? = null
+            var southPoleCandidatesForOverlay: List<Pair<Float, Float>> = emptyList()
 
             val (baseCandidatePoints, referenceConfidence, modeName) = if (hemisphereMode == Hemisphere.NORTH) {
                 val scored = polarisFinder.scoreStars(stars, bitmap.height, bitmap.width).take(8)
@@ -519,6 +539,7 @@ class MainActivity : AppCompatActivity() {
                     bitmap.width,
                     maxCandidates = 8
                 )
+                southPoleCandidatesForOverlay = southCandidates.take(5).map { Pair(it.pole.x, it.pole.y) }
                 if (southCandidates.isEmpty()) {
                     Triple(emptyList(), 0f, "Guney Haci")
                 } else {
@@ -561,6 +582,28 @@ class MainActivity : AppCompatActivity() {
                     candidatePoints.add(Triple(plateSolve.poleX, plateSolve.poleY, plateWeight))
                 }
             }
+            var pointerConfidence = 0f
+            if (hemisphereMode == Hemisphere.SOUTH) {
+                val initialSouthPole = candidatePoints.maxByOrNull { it.third }?.let { Pair(it.first, it.second) }
+                if (initialSouthPole != null) {
+                    southPointerRefinement = refineSouthPoleWithPointers(
+                        stars = stars,
+                        initialSouthPole = initialSouthPole,
+                        imageHeight = bitmap.height
+                    )
+                    if (southPointerRefinement != null) {
+                        pointerConfidence = southPointerRefinement!!.score.coerceIn(0f, 1f)
+                        val w = (0.28f + 0.72f * pointerConfidence).coerceIn(0.22f, 1f)
+                        candidatePoints.add(
+                            Triple(
+                                southPointerRefinement!!.refinedPole.first,
+                                southPointerRefinement!!.refinedPole.second,
+                                w
+                            )
+                        )
+                    }
+                }
+            }
 
             if (candidatePoints.isEmpty()) {
                 runOnUiThread {
@@ -576,10 +619,18 @@ class MainActivity : AppCompatActivity() {
             )
             val combinedConfidence =
                 (
-                    0.37f * referenceConfidence +
-                        0.25f * patternResult.confidence +
-                        0.20f * catalogConfidence +
-                        0.18f * plateSolveConfidence
+                    if (hemisphereMode == Hemisphere.NORTH) {
+                        0.37f * referenceConfidence +
+                            0.25f * patternResult.confidence +
+                            0.20f * catalogConfidence +
+                            0.18f * plateSolveConfidence
+                    } else {
+                        0.32f * referenceConfidence +
+                            0.20f * patternResult.confidence +
+                            0.18f * catalogConfidence +
+                            0.15f * plateSolveConfidence +
+                            0.15f * pointerConfidence
+                    }
                     )
                     .coerceIn(0f, 1f)
             if (hemisphereMode == Hemisphere.NORTH) {
@@ -668,20 +719,24 @@ class MainActivity : AppCompatActivity() {
                 )
                 val overlayStars = selectConstellationOverlayStars(
                     stars = stars,
+                    hemisphere = hemisphereMode,
                     candidatePoints = candidatePoints,
-                    imageWidth = bitmap.width
+                    imageWidth = bitmap.width,
+                    pointerRefinement = southPointerRefinement
                 )
                 val polePoint = if (hemisphereMode == Hemisphere.NORTH) {
                     candidatePoints.maxByOrNull { it.third }?.let { Pair(it.first, it.second) }
                 } else {
-                    plateSolve?.let { Pair(it.poleX, it.poleY) } ?: candidatePoints.maxByOrNull { it.third }?.let { Pair(it.first, it.second) }
+                    candidatePoints.maxByOrNull { it.third }?.let { Pair(it.first, it.second) }
                 }
                 val annotated = buildAnnotatedSkyBitmap(
                     sourceBitmap = bitmap,
                     allStars = stars,
                     overlayStars = overlayStars,
                     patternName = constellation,
-                    polePoint = polePoint
+                    polePoint = polePoint,
+                    southPoleCandidates = southPoleCandidatesForOverlay,
+                    pointerRefinement = southPointerRefinement
                 )
                 latestAnnotatedBitmap?.recycle()
                 latestAnnotatedBitmap = annotated
@@ -988,17 +1043,84 @@ class MainActivity : AppCompatActivity() {
         return rotated
     }
 
+    private fun refineSouthPoleWithPointers(
+        stars: List<Star>,
+        initialSouthPole: Pair<Float, Float>,
+        imageHeight: Int
+    ): SouthPointerRefinement? {
+        if (stars.size < 8 || imageHeight <= 0) return null
+        val bright = stars.sortedByDescending { it.brightness }.take(22)
+        var bestPair: Pair<Star, Star>? = null
+        var bestScore = 0f
+
+        for (i in 0 until bright.size) {
+            for (j in i + 1 until bright.size) {
+                val a = bright[i]
+                val b = bright[j]
+                val dx = b.x - a.x
+                val dy = b.y - a.y
+                val d = kotlin.math.sqrt(dx * dx + dy * dy)
+                if (d < imageHeight * 0.04f || d > imageHeight * 0.45f) continue
+
+                val num = kotlin.math.abs((initialSouthPole.second - a.y) * dx - (initialSouthPole.first - a.x) * dy)
+                val lineDist = num / d.coerceAtLeast(1e-3f)
+                val lineScore = (1f - lineDist / (imageHeight * 0.18f)).coerceIn(0f, 1f)
+                val brightnessScore = (((a.brightness + b.brightness) / 2f) / 255f).coerceIn(0f, 1f)
+                val score = (0.62f * lineScore + 0.38f * brightnessScore).coerceIn(0f, 1f)
+
+                if (score > bestScore) {
+                    bestScore = score
+                    bestPair = Pair(a, b)
+                }
+            }
+        }
+        val pair = bestPair ?: return null
+        if (bestScore < 0.38f) return null
+
+        val a = pair.first
+        val b = pair.second
+        val dx = b.x - a.x
+        val dy = b.y - a.y
+        val d = kotlin.math.sqrt(dx * dx + dy * dy).coerceAtLeast(1e-3f)
+        val ux = dx / d
+        val uy = dy / d
+        val k = 2.8f
+        val candA = Pair(a.x + k * d * ux, a.y + k * d * uy)
+        val candB = Pair(b.x - k * d * ux, b.y - k * d * uy)
+        val da = hypot((candA.first - initialSouthPole.first).toDouble(), (candA.second - initialSouthPole.second).toDouble())
+        val db = hypot((candB.first - initialSouthPole.first).toDouble(), (candB.second - initialSouthPole.second).toDouble())
+        val pointerTarget = if (da <= db) candA else candB
+        val refined = Pair(
+            0.68f * initialSouthPole.first + 0.32f * pointerTarget.first,
+            0.68f * initialSouthPole.second + 0.32f * pointerTarget.second
+        )
+        return SouthPointerRefinement(
+            refinedPole = refined,
+            pointerA = a,
+            pointerB = b,
+            score = bestScore
+        )
+    }
+
     private fun selectConstellationOverlayStars(
         stars: List<Star>,
+        hemisphere: Hemisphere,
         candidatePoints: List<Triple<Float, Float, Float>>,
-        imageWidth: Int
+        imageWidth: Int,
+        pointerRefinement: SouthPointerRefinement?
     ): List<Star> {
         if (stars.isEmpty()) return emptyList()
         val seed = candidatePoints.maxByOrNull { it.third }?.let { Pair(it.first, it.second) }
             ?: Pair(imageWidth / 2f, stars.minOfOrNull { it.y } ?: 0f)
-        return stars
+        val nearest = stars
             .sortedBy { hypot((it.x - seed.first).toDouble(), (it.y - seed.second).toDouble()) }
-            .take(8)
+            .take(if (hemisphere == Hemisphere.NORTH) 7 else 6)
+            .toMutableList()
+        if (hemisphere == Hemisphere.SOUTH && pointerRefinement != null) {
+            nearest.add(pointerRefinement.pointerA)
+            nearest.add(pointerRefinement.pointerB)
+        }
+        return nearest.distinctBy { "${it.x.toInt()}_${it.y.toInt()}" }
     }
 
     private fun buildAnnotatedSkyBitmap(
@@ -1006,7 +1128,9 @@ class MainActivity : AppCompatActivity() {
         allStars: List<Star>,
         overlayStars: List<Star>,
         patternName: String,
-        polePoint: Pair<Float, Float>?
+        polePoint: Pair<Float, Float>?,
+        southPoleCandidates: List<Pair<Float, Float>>,
+        pointerRefinement: SouthPointerRefinement?
     ): Bitmap {
         val mutable = sourceBitmap.copy(Bitmap.Config.ARGB_8888, true)
         val canvas = Canvas(mutable)
@@ -1029,6 +1153,11 @@ class MainActivity : AppCompatActivity() {
             style = Paint.Style.STROKE
             strokeWidth = 3.2f
         }
+        val candidatePolePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(210, 255, 124, 0)
+            style = Paint.Style.STROKE
+            strokeWidth = 2.2f
+        }
         val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
             textSize = (mutable.width * 0.032f).coerceIn(26f, 44f)
@@ -1040,7 +1169,7 @@ class MainActivity : AppCompatActivity() {
             canvas.drawCircle(s.x, s.y, r, allStarPaint)
         }
 
-        val orderedOverlay = overlayStars.sortedBy { it.x }
+        val orderedOverlay = overlayStars.sortedBy { it.y }
         for (i in orderedOverlay.indices) {
             val s = orderedOverlay[i]
             canvas.drawCircle(s.x, s.y, 5.2f, overlayStarPaint)
@@ -1049,6 +1178,14 @@ class MainActivity : AppCompatActivity() {
                 canvas.drawLine(p.x, p.y, s.x, s.y, linePaint)
             }
         }
+        for (c in southPoleCandidates) {
+            canvas.drawCircle(c.first, c.second, 9f, candidatePolePaint)
+        }
+        if (pointerRefinement != null) {
+            val a = pointerRefinement.pointerA
+            val b = pointerRefinement.pointerB
+            canvas.drawLine(a.x, a.y, b.x, b.y, linePaint)
+        }
 
         if (polePoint != null) {
             val px = polePoint.first
@@ -1056,7 +1193,7 @@ class MainActivity : AppCompatActivity() {
             canvas.drawCircle(px, py, 18f, polePaint)
             canvas.drawLine(px - 24f, py, px + 24f, py, polePaint)
             canvas.drawLine(px, py - 24f, px, py + 24f, polePaint)
-            canvas.drawText("Kutup Noktasi", px + 24f, py - 16f, labelPaint)
+            canvas.drawText("SCP / Kutup", px + 24f, py - 16f, labelPaint)
         }
 
         val top = (mutable.height * 0.06f).coerceAtLeast(40f)
