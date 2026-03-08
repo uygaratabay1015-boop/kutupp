@@ -36,6 +36,7 @@ import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.exifinterface.media.ExifInterface
+import org.json.JSONArray
 import java.io.InputStream
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -48,6 +49,7 @@ import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.math.atan
 import kotlin.math.hypot
+import kotlin.math.pow
 
 class MainActivity : AppCompatActivity() {
 
@@ -65,6 +67,11 @@ class MainActivity : AppCompatActivity() {
         val pointerB: Star,
         val score: Float
     )
+    data class PolarStation(
+        val name: String,
+        val latitude: Double,
+        val longitude: Double
+    )
 
     companion object {
         private const val TAG = "KutupNav"
@@ -77,6 +84,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var galleryButton: Button
     private lateinit var calculateButton: Button
     private lateinit var modeButton: Button
+    private lateinit var showMapButton: Button
     private lateinit var compassStatusTextView: TextView
     private lateinit var infoTextView: TextView
     private lateinit var resultTextView: TextView
@@ -114,6 +122,9 @@ class MainActivity : AppCompatActivity() {
     private var selectedExifDateTime: LocalDateTime? = null
     private var selectedExifAzimuthDeg: Float? = null
     private var latestAnnotatedBitmap: Bitmap? = null
+    private var polarStations: List<PolarStation> = emptyList()
+    private var lastEstimatedLatitude: Double? = null
+    private var lastEstimatedLongitude: Double? = null
     private var isProcessing = false
 
     private val pickImageLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
@@ -163,6 +174,7 @@ class MainActivity : AppCompatActivity() {
 
         skyPatternMatcher = loadSkyPatternMatcher()
         starCatalogMatcher = loadStarCatalogMatcher()
+        polarStations = loadPolarStations()
 
         initializeUI()
         initializeModules()
@@ -191,6 +203,7 @@ class MainActivity : AppCompatActivity() {
         galleryButton = findViewById(R.id.galleryButton)
         calculateButton = findViewById(R.id.calculateButton)
         modeButton = findViewById(R.id.modeButton)
+        showMapButton = findViewById(R.id.showMapButton)
         compassStatusTextView = findViewById(R.id.compassStatus)
         infoTextView = findViewById(R.id.azimutuResult)
         resultTextView = findViewById(R.id.latitudeResult)
@@ -229,6 +242,7 @@ class MainActivity : AppCompatActivity() {
 
         captureButton.isEnabled = false
         calculateButton.isEnabled = false
+        showMapButton.isEnabled = false
 
         captureButton.setOnClickListener { takePhotoForSelection() }
         galleryButton.setOnClickListener {
@@ -244,6 +258,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         calculateButton.setOnClickListener { onCalculatePressed() }
+        showMapButton.setOnClickListener { showEstimatedLocationOnMap() }
         modeButton.setOnClickListener {
             hemisphereMode = if (hemisphereMode == Hemisphere.NORTH) Hemisphere.SOUTH else Hemisphere.NORTH
             updateModeText()
@@ -700,6 +715,7 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 val hemisphereLabel = if (result.latitude >= 0f) "K" else "G"
                 val sourceLabel = if (source == CaptureSource.CAMERA) "KAMERA" else "GALERI"
+                val estimatedLongitude = calculateLongitudeFromUtcTime(observationDateTime)
                 val constellation = constellationLabel(
                     patternName = patternResult.matchedPattern,
                     mode = hemisphereMode,
@@ -728,6 +744,9 @@ class MainActivity : AppCompatActivity() {
                     dayOfYearInt,
                     stars.size
                 )
+                lastEstimatedLatitude = result.latitude.toDouble()
+                lastEstimatedLongitude = estimatedLongitude
+                showMapButton.isEnabled = true
                 val overlayStars = selectConstellationOverlayStars(
                     stars = stars,
                     hemisphere = hemisphereMode,
@@ -876,6 +895,7 @@ class MainActivity : AppCompatActivity() {
         captureButton.isEnabled = !processing && imageCapture != null
         galleryButton.isEnabled = !processing
         modeButton.isEnabled = !processing
+        showMapButton.isEnabled = !processing && lastEstimatedLatitude != null && lastEstimatedLongitude != null
         dateModeToday.isEnabled = !processing
         dateModeManual.isEnabled = !processing
         manualDateInput.isEnabled = !processing && dateModeManual.isChecked
@@ -887,6 +907,94 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateCalculateButton() {
         calculateButton.isEnabled = !isProcessing && selectedBitmap != null
+    }
+
+    private fun showEstimatedLocationOnMap() {
+        val lat = lastEstimatedLatitude
+        val lon = lastEstimatedLongitude
+        if (lat == null || lon == null) {
+            Toast.makeText(this, "Once hesaplama yap", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val markers = mutableListOf<MapMarker>()
+        markers.add(
+            MapMarker(
+                name = "Tahmini",
+                latitude = lat,
+                longitude = lon,
+                color = Color.parseColor("#FF5252"),
+                radiusPx = 8f
+            )
+        )
+        val nearest = nearestStation(lat, lon)
+        if (nearest != null) {
+            markers.add(
+                MapMarker(
+                    name = nearest.name,
+                    latitude = nearest.latitude,
+                    longitude = nearest.longitude,
+                    color = Color.parseColor("#FFD54F"),
+                    radiusPx = 6f
+                )
+            )
+        }
+        for (s in polarStations.take(10)) {
+            markers.add(
+                MapMarker(
+                    name = s.name,
+                    latitude = s.latitude,
+                    longitude = s.longitude,
+                    color = Color.parseColor("#42A5F5"),
+                    radiusPx = 4f
+                )
+            )
+        }
+        val label = String.format(
+            Locale.US,
+            "Tahmini: %.2f°, %.2f°",
+            lat,
+            lon
+        )
+        MiniMapView.showFullscreenMap(this, markers, label)
+    }
+
+    private fun calculateLongitudeFromUtcTime(dateTime: LocalDateTime): Double {
+        val totalMinutes = dateTime.hour * 60.0 + dateTime.minute.toDouble()
+        var longitude = (totalMinutes - 720.0) * (360.0 / 1440.0)
+        if (longitude > 180.0) longitude -= 360.0
+        if (longitude < -180.0) longitude += 360.0
+        return longitude
+    }
+
+    private fun nearestStation(latitude: Double, longitude: Double): PolarStation? {
+        if (polarStations.isEmpty()) return null
+        return polarStations.minByOrNull { s ->
+            val dLat = latitude - s.latitude
+            val dLon = longitude - s.longitude
+            dLat.pow(2) + dLon.pow(2)
+        }
+    }
+
+    private fun loadPolarStations(): List<PolarStation> {
+        return try {
+            val json = assets.open("polar_stations.json").bufferedReader().use { it.readText() }
+            val arr = JSONArray(json)
+            val out = mutableListOf<PolarStation>()
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                out.add(
+                    PolarStation(
+                        name = o.optString("name", "Istasyon"),
+                        latitude = o.optDouble("latitude", 0.0),
+                        longitude = o.optDouble("longitude", 0.0)
+                    )
+                )
+            }
+            out
+        } catch (e: Exception) {
+            Log.e(TAG, "Polar station verisi okunamadi", e)
+            emptyList()
+        }
     }
 
     private fun showHorizonPickerDialog(bitmap: Bitmap) {
