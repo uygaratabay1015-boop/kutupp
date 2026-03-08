@@ -1,17 +1,23 @@
 ﻿package com.kutup.navigasyon
 
 import android.Manifest
+import android.app.Dialog
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Matrix
+import android.graphics.Paint
 import android.hardware.camera2.CameraCharacteristics
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import android.util.Size
+import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.RadioButton
 import android.widget.TextView
 import android.widget.Toast
@@ -40,6 +46,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.math.atan
+import kotlin.math.hypot
 
 class MainActivity : AppCompatActivity() {
 
@@ -98,6 +105,7 @@ class MainActivity : AppCompatActivity() {
     private var selectedCaptureDateTime: LocalDateTime? = null
     private var selectedExifDateTime: LocalDateTime? = null
     private var selectedExifAzimuthDeg: Float? = null
+    private var latestAnnotatedBitmap: Bitmap? = null
     private var isProcessing = false
 
     private val pickImageLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
@@ -164,6 +172,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         selectedBitmap?.recycle()
+        latestAnnotatedBitmap?.recycle()
         compass.stopListening()
         cameraExecutor.shutdown()
     }
@@ -657,6 +666,26 @@ class MainActivity : AppCompatActivity() {
                     dayOfYearInt,
                     stars.size
                 )
+                val overlayStars = selectConstellationOverlayStars(
+                    stars = stars,
+                    candidatePoints = candidatePoints,
+                    imageWidth = bitmap.width
+                )
+                val polePoint = if (hemisphereMode == Hemisphere.NORTH) {
+                    candidatePoints.maxByOrNull { it.third }?.let { Pair(it.first, it.second) }
+                } else {
+                    plateSolve?.let { Pair(it.poleX, it.poleY) } ?: candidatePoints.maxByOrNull { it.third }?.let { Pair(it.first, it.second) }
+                }
+                val annotated = buildAnnotatedSkyBitmap(
+                    sourceBitmap = bitmap,
+                    allStars = stars,
+                    overlayStars = overlayStars,
+                    patternName = constellation,
+                    polePoint = polePoint
+                )
+                latestAnnotatedBitmap?.recycle()
+                latestAnnotatedBitmap = annotated
+                showAnnotatedSkyDialog(annotated)
                 setProcessingState(false)
             }
         } catch (e: Exception) {
@@ -957,6 +986,98 @@ class MainActivity : AppCompatActivity() {
         val rotated = Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
         if (rotated != source) source.recycle()
         return rotated
+    }
+
+    private fun selectConstellationOverlayStars(
+        stars: List<Star>,
+        candidatePoints: List<Triple<Float, Float, Float>>,
+        imageWidth: Int
+    ): List<Star> {
+        if (stars.isEmpty()) return emptyList()
+        val seed = candidatePoints.maxByOrNull { it.third }?.let { Pair(it.first, it.second) }
+            ?: Pair(imageWidth / 2f, stars.minOfOrNull { it.y } ?: 0f)
+        return stars
+            .sortedBy { hypot((it.x - seed.first).toDouble(), (it.y - seed.second).toDouble()) }
+            .take(8)
+    }
+
+    private fun buildAnnotatedSkyBitmap(
+        sourceBitmap: Bitmap,
+        allStars: List<Star>,
+        overlayStars: List<Star>,
+        patternName: String,
+        polePoint: Pair<Float, Float>?
+    ): Bitmap {
+        val mutable = sourceBitmap.copy(Bitmap.Config.ARGB_8888, true)
+        val canvas = Canvas(mutable)
+
+        val allStarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(170, 180, 180, 180)
+            style = Paint.Style.FILL
+        }
+        val overlayStarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(240, 255, 214, 10)
+            style = Paint.Style.FILL
+        }
+        val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(220, 255, 214, 10)
+            style = Paint.Style.STROKE
+            strokeWidth = 2.5f
+        }
+        val polePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(245, 255, 64, 64)
+            style = Paint.Style.STROKE
+            strokeWidth = 3.2f
+        }
+        val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = (mutable.width * 0.032f).coerceIn(26f, 44f)
+            setShadowLayer(6f, 1f, 1f, Color.BLACK)
+        }
+
+        for (s in allStars.take(120)) {
+            val r = (1.3f + (s.brightness / 255f) * 2.1f).coerceIn(1.2f, 4.0f)
+            canvas.drawCircle(s.x, s.y, r, allStarPaint)
+        }
+
+        val orderedOverlay = overlayStars.sortedBy { it.x }
+        for (i in orderedOverlay.indices) {
+            val s = orderedOverlay[i]
+            canvas.drawCircle(s.x, s.y, 5.2f, overlayStarPaint)
+            if (i > 0) {
+                val p = orderedOverlay[i - 1]
+                canvas.drawLine(p.x, p.y, s.x, s.y, linePaint)
+            }
+        }
+
+        if (polePoint != null) {
+            val px = polePoint.first
+            val py = polePoint.second
+            canvas.drawCircle(px, py, 18f, polePaint)
+            canvas.drawLine(px - 24f, py, px + 24f, py, polePaint)
+            canvas.drawLine(px, py - 24f, px, py + 24f, polePaint)
+            canvas.drawText("Kutup Noktasi", px + 24f, py - 16f, labelPaint)
+        }
+
+        val top = (mutable.height * 0.06f).coerceAtLeast(40f)
+        canvas.drawText("Takimyildiz bolgesi: $patternName", 24f, top, labelPaint)
+        return mutable
+    }
+
+    private fun showAnnotatedSkyDialog(annotatedBitmap: Bitmap) {
+        val dialog = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+        val imageView = ImageView(this).apply {
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            setBackgroundColor(Color.BLACK)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setImageBitmap(annotatedBitmap)
+            setOnClickListener { dialog.dismiss() }
+        }
+        dialog.setContentView(imageView)
+        dialog.show()
     }
 
     private fun azimuthConsistencyScore(
