@@ -34,6 +34,8 @@ class SolverConfig:
     horizontal_fov_deg: float = 70.0
     camera_pitch_deg: float = 0.0
     camera_roll_deg: float = 0.0
+    expected_latitude_deg: float | None = None
+    debug: bool = False
 
 
 @dataclass(frozen=True)

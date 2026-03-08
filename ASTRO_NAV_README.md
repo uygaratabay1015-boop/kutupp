@@ -25,6 +25,12 @@ Bu paket, gece gokyuzu fotografindan enlem tahmini icin moduler bir yapi sunar.
 python run_astro_nav.py --image path/to/night.jpg --mode south --vfov 60 --hfov 70 --pitch 12 --roll 1
 ```
 
+South Pole dogrulama ve debug:
+
+```bash
+python run_astro_nav.py --image path/to/night.jpg --mode south --pitch 0 --roll 0 --expected-lat -90 --debug
+```
+
 ## Test
 
 ```bash
@@ -38,4 +44,3 @@ python -m unittest discover -s astro_nav_tests -v
 - `north_polaris` veya `south_scp`
 - `latitude`
 - `warnings`
-

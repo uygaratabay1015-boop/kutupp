@@ -106,9 +106,26 @@ class LatitudeEstimator:
         if south.sigma_octantis_check is not None and south.sigma_octantis_check < 0.12:
             warnings.append("Sigma Octantis yardimci kontrolu cozumle uyumlu degil.")
 
-        alt = self.lat_solver.pole_altitude_from_pixel(south.scp_xy[0], south.scp_xy[1], w, h)
-        lat = self.lat_solver.latitude_from_altitude(alt, mode)
+        scp_alt = self.lat_solver.pole_altitude_from_pixel(south.scp_xy[0], south.scp_xy[1], w, h)
+        lat = self.lat_solver.latitude_from_altitude(scp_alt, mode)
         confidence = max(0.0, min(1.0, south.confidence))
+
+        crux_center_alt = self._crux_center_altitude(patterns, w, h)
+        if crux_center_alt is not None and abs(crux_center_alt - scp_alt) < 0.8:
+            warnings.append("SCP altitude ve Crux center altitude neredeyse ayni; geometriyi kontrol et.")
+
+        expected = self.config.solver.expected_latitude_deg
+        if expected is not None and abs(expected + 90.0) <= 2.0 and abs(scp_alt - 90.0) > 8.0:
+            warnings.append("SCP detected but altitude inconsistent with South Pole geometry.")
+
+        if self.config.solver.debug:
+            crux_center = self._crux_center_point(patterns)
+            print("Estimated SCP pixel:", south.scp_xy)
+            print("SCP altitude:", scp_alt)
+            print("Crux center pixel:", crux_center)
+            print("Crux center altitude:", crux_center_alt)
+            print("Camera pitch:", self.config.solver.camera_pitch_deg)
+
         return ProcessingResult(
             success=True,
             hemisphere_mode=mode,
@@ -117,7 +134,7 @@ class LatitudeEstimator:
             south_scp=PoleEstimate(
                 x=south.scp_xy[0],
                 y=south.scp_xy[1],
-                altitude_deg=alt,
+                altitude_deg=scp_alt,
                 confidence=confidence,
                 method="crux+alpha_beta_centauri",
             ),
@@ -129,3 +146,16 @@ class LatitudeEstimator:
             warnings=warnings,
         )
 
+    def _crux_center_point(self, patterns: List[PatternDetection]) -> tuple[float, float] | None:
+        crux_pattern = next((p for p in patterns if p.name == "crux"), None)
+        if crux_pattern is None or not crux_pattern.points:
+            return None
+        xs = [p[0] for p in crux_pattern.points]
+        ys = [p[1] for p in crux_pattern.points]
+        return (sum(xs) / len(xs), sum(ys) / len(ys))
+
+    def _crux_center_altitude(self, patterns: List[PatternDetection], image_w: int, image_h: int) -> float | None:
+        center = self._crux_center_point(patterns)
+        if center is None:
+            return None
+        return self.lat_solver.pole_altitude_from_pixel(center[0], center[1], image_w, image_h)
