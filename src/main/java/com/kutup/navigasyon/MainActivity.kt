@@ -628,7 +628,8 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             val plateSolveOk = plateSolve != null && plateSolveConfidence >= 0.45f
-            if (useOfflinePlate && plateSolveOk) {
+            val preferPlateSolve = useOfflinePlate || hemisphereMode == Hemisphere.SOUTH
+            if (preferPlateSolve && plateSolveOk) {
                 candidatePoints.clear()
                 candidatePoints.add(Triple(plateSolve!!.poleX, plateSolve.poleY, 1.0f))
                 modeName = "PlateSolve"
@@ -671,8 +672,8 @@ class MainActivity : AppCompatActivity() {
                 hemisphereMode = if (hemisphereMode == Hemisphere.NORTH) "north" else "south"
             )
             val combinedConfidence =
-                if (useOfflinePlate && plateSolveOk) {
-                    (0.55f * plateSolveConfidence + 0.45f * catalogConfidence).coerceIn(0f, 1f)
+                if (preferPlateSolve && plateSolveOk) {
+                    (0.65f * plateSolveConfidence + 0.35f * catalogConfidence).coerceIn(0f, 1f)
                 } else {
                     (
                         if (hemisphereMode == Hemisphere.NORTH) {
@@ -753,7 +754,7 @@ class MainActivity : AppCompatActivity() {
                     referenceConfidence = referenceConfidence,
                     patternConfidence = patternResult.confidence
                 )
-                val modeTag = if (useOfflinePlate && plateSolveOk) "Offline" else if (useOfflinePlate) "Offline-Fallback" else "Klasik"
+            val modeTag = if (preferPlateSolve && plateSolveOk) "PlateSolve" else if (useOfflinePlate) "Offline-Fallback" else "Klasik"
                 resultTextView.text = String.format(
                     Locale.US,
                     "%s | Enlem %.4fÂ°%s | Hata +/-%.2fÂ° | Guven %.2f",
