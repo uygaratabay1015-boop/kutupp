@@ -847,7 +847,7 @@ class MainActivity : AppCompatActivity() {
             hemisphereMode == Hemisphere.SOUTH &&
             source == CaptureSource.GALLERY
         ) {
-            50f
+            estimateHorizonPercent(selectedBitmap) ?: 50f
         } else {
             horizonPercentRaw
         }
@@ -884,7 +884,7 @@ class MainActivity : AppCompatActivity() {
             manualPitch != null && manualRoll != null -> "Pitch/Roll: Manuel"
             manualPitch != null -> "Pitch: Manuel"
             horizonPitch != null && manualRoll != null -> "Pitch: Ufuk, Roll: Manuel"
-            horizonPitch != null && horizonPercentRaw == null -> "Pitch: Ufuk (varsayim)"
+            horizonPitch != null && horizonPercentRaw == null -> "Pitch: Ufuk (otomatik)"
             horizonPitch != null -> "Pitch: Ufuk"
             source == CaptureSource.CAMERA -> "Pitch/Roll: Sensor"
             else -> "Pitch/Roll: Otomatik varsayim (0/0)"
@@ -1125,6 +1125,65 @@ class MainActivity : AppCompatActivity() {
         if (touchY < transY || touchY > transY + shownHeight) return null
         val relY = ((touchY - transY) / shownHeight).coerceIn(0f, 1f)
         return (relY * 100f).coerceIn(0f, 100f)
+    }
+
+    private fun estimateHorizonPercent(bitmap: Bitmap?): Float? {
+        if (bitmap == null) return null
+        val width = bitmap.width
+        val height = bitmap.height
+        if (width < 16 || height < 16) return null
+
+        val sampleCols = 24
+        val sampleRows = 36
+        val colStep = maxOf(1, width / sampleCols)
+        val rowStep = maxOf(1, height / sampleRows)
+        val cols = width / colStep
+        val rows = height / rowStep
+        if (cols < 4 || rows < 6) return null
+
+        val rowAvg = FloatArray(rows)
+        var rowIndex = 0
+        var y = 0
+        while (y < height && rowIndex < rows) {
+            var sum = 0f
+            var count = 0
+            var x = 0
+            while (x < width) {
+                val color = bitmap.getPixel(x, y)
+                val r = (color shr 16) and 0xFF
+                val g = (color shr 8) and 0xFF
+                val b = color and 0xFF
+                val luma = 0.2126f * r + 0.7152f * g + 0.0722f * b
+                sum += luma
+                count += 1
+                x += colStep
+            }
+            rowAvg[rowIndex] = if (count == 0) 0f else sum / count.toFloat()
+            rowIndex += 1
+            y += rowStep
+        }
+
+        val smooth = FloatArray(rowAvg.size)
+        for (i in rowAvg.indices) {
+            val a = rowAvg[(i - 1).coerceAtLeast(0)]
+            val b = rowAvg[i]
+            val c = rowAvg[(i + 1).coerceAtMost(rowAvg.lastIndex)]
+            smooth[i] = (a + 2f * b + c) / 4f
+        }
+
+        var bestIdx = -1
+        var bestGrad = 0f
+        for (i in 1 until smooth.size - 1) {
+            val g = smooth[i + 1] - smooth[i - 1]
+            if (g > bestGrad) {
+                bestGrad = g
+                bestIdx = i
+            }
+        }
+
+        if (bestIdx <= 0) return null
+        val rel = bestIdx.toFloat() / (smooth.size - 1).toFloat()
+        return (rel * 100f).coerceIn(8f, 92f)
     }
 
     private fun loadSkyPatternMatcher(): SkyPatternMatcher {
