@@ -81,6 +81,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private lateinit var previewView: PreviewView
+    private lateinit var controlPanel: ViewGroup
+    private lateinit var togglePanelButton: Button
     private lateinit var captureButton: Button
     private lateinit var galleryButton: Button
     private lateinit var calculateButton: Button
@@ -99,8 +101,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var manualRollInput: EditText
     private lateinit var horizonPickButton: Button
     private lateinit var offlinePlateSwitch: SwitchCompat
-    private lateinit var compactTextSwitch: SwitchCompat
-    private val textSizeDefaults = mutableMapOf<TextView, Float>()
 
     private lateinit var compass: CompassSensor
     private lateinit var starDetector: StarDetector
@@ -203,6 +203,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun initializeUI() {
         previewView = findViewById(R.id.previewView)
+        controlPanel = findViewById(R.id.controlPanel)
+        togglePanelButton = findViewById(R.id.togglePanelButton)
         captureButton = findViewById(R.id.captureButton)
         galleryButton = findViewById(R.id.galleryButton)
         calculateButton = findViewById(R.id.calculateButton)
@@ -221,7 +223,6 @@ class MainActivity : AppCompatActivity() {
         manualRollInput = findViewById(R.id.manualRollInput)
         horizonPickButton = findViewById(R.id.horizonPickButton)
         offlinePlateSwitch = findViewById(R.id.offlinePlateSwitch)
-        compactTextSwitch = findViewById(R.id.compactTextSwitch)
 
         val now = LocalDateTime.now()
         manualDateInput.setText(now.toLocalDate().toString())
@@ -263,9 +264,7 @@ class MainActivity : AppCompatActivity() {
                 showHorizonPickerDialog(bmp)
             }
         }
-        compactTextSwitch.setOnCheckedChangeListener { _, checked ->
-            applyCompactText(checked)
-        }
+        togglePanelButton.setOnClickListener { toggleControlPanel() }
         calculateButton.setOnClickListener { onCalculatePressed() }
         showMapButton.setOnClickListener { showEstimatedLocationOnMap() }
         modeButton.setOnClickListener {
@@ -274,8 +273,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         cameraExecutor = Executors.newSingleThreadExecutor()
-        registerTextSizes()
-        applyCompactText(compactTextSwitch.isChecked)
+    }
+
+    private fun toggleControlPanel() {
+        val isVisible = controlPanel.visibility == View.VISIBLE
+        controlPanel.visibility = if (isVisible) View.GONE else View.VISIBLE
+        togglePanelButton.text = if (isVisible) "Panel Goster" else "Panel Gizle"
     }
 
     private fun initializeModules() {
@@ -352,42 +355,6 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Kamera baslatilamadi", Toast.LENGTH_SHORT).show()
             }
         }, ContextCompat.getMainExecutor(this))
-    }
-
-    private fun registerTextSizes() {
-        val views = listOf(
-            compassStatusTextView,
-            infoTextView,
-            resultTextView,
-            dateModeToday,
-            dateModeManual,
-            manualDateInput,
-            manualTimeInput,
-            manualPitchInput,
-            manualAzimuthInput,
-            manualHorizonPercentInput,
-            manualRollInput,
-            horizonPickButton,
-            captureButton,
-            galleryButton,
-            calculateButton,
-            modeButton,
-            showMapButton,
-            offlinePlateSwitch,
-            compactTextSwitch
-        )
-        for (v in views) {
-            if (!textSizeDefaults.containsKey(v)) {
-                textSizeDefaults[v] = v.textSize
-            }
-        }
-    }
-
-    private fun applyCompactText(enabled: Boolean) {
-        val scale = if (enabled) 0.82f else 1.0f
-        for ((view, baseSize) in textSizeDefaults) {
-            view.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, baseSize * scale)
-        }
     }
 
     private fun updateVerticalFovFromCamera(cam: Camera?) {
