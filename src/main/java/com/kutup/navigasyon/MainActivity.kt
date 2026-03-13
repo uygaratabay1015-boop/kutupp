@@ -468,7 +468,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val calibration = resolveOrientationCalibration(source, bitmap.height, verticalFov)
+        val calibration = resolveOrientationCalibration(source, bitmap.height, verticalFov, hemisphereMode)
 
         setProcessingState(true)
         val useOfflinePlate = offlinePlateSwitch.isChecked
@@ -835,12 +835,22 @@ class MainActivity : AppCompatActivity() {
     private fun resolveOrientationCalibration(
         source: CaptureSource,
         imageHeight: Int,
-        vFov: Float
+        vFov: Float,
+        hemisphereMode: Hemisphere
     ): OrientationCalibration {
         val manualPitch = parseFloatOrNull(manualPitchInput.text?.toString().orEmpty())
         val manualRoll = parseFloatOrNull(manualRollInput.text?.toString().orEmpty())
         val manualAzimuth = parseFloatOrNull(manualAzimuthInput.text?.toString().orEmpty())?.let { normalize360(it) }
-        val horizonPercent = parseFloatOrNull(manualHorizonPercentInput.text?.toString().orEmpty())
+        val horizonPercentRaw = parseFloatOrNull(manualHorizonPercentInput.text?.toString().orEmpty())
+        val horizonPercent = if (horizonPercentRaw == null &&
+            manualPitch == null &&
+            hemisphereMode == Hemisphere.SOUTH &&
+            source == CaptureSource.GALLERY
+        ) {
+            50f
+        } else {
+            horizonPercentRaw
+        }
 
         val horizonPitch = horizonPercent?.let {
             if (it in 0f..100f) {
@@ -874,6 +884,7 @@ class MainActivity : AppCompatActivity() {
             manualPitch != null && manualRoll != null -> "Pitch/Roll: Manuel"
             manualPitch != null -> "Pitch: Manuel"
             horizonPitch != null && manualRoll != null -> "Pitch: Ufuk, Roll: Manuel"
+            horizonPitch != null && horizonPercentRaw == null -> "Pitch: Ufuk (varsayim)"
             horizonPitch != null -> "Pitch: Ufuk"
             source == CaptureSource.CAMERA -> "Pitch/Roll: Sensor"
             else -> "Pitch/Roll: Otomatik varsayim (0/0)"
