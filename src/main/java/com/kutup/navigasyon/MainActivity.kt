@@ -24,6 +24,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.SwitchCompat
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
@@ -97,6 +98,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var manualHorizonPercentInput: EditText
     private lateinit var manualRollInput: EditText
     private lateinit var horizonPickButton: Button
+    private lateinit var offlinePlateSwitch: SwitchCompat
 
     private lateinit var compass: CompassSensor
     private lateinit var starDetector: StarDetector
@@ -216,6 +218,7 @@ class MainActivity : AppCompatActivity() {
         manualHorizonPercentInput = findViewById(R.id.manualHorizonPercentInput)
         manualRollInput = findViewById(R.id.manualRollInput)
         horizonPickButton = findViewById(R.id.horizonPickButton)
+        offlinePlateSwitch = findViewById(R.id.offlinePlateSwitch)
 
         val now = LocalDateTime.now()
         manualDateInput.setText(now.toLocalDate().toString())
@@ -456,6 +459,7 @@ class MainActivity : AppCompatActivity() {
         val calibration = resolveOrientationCalibration(source, bitmap.height, verticalFov)
 
         setProcessingState(true)
+        val useOfflinePlate = offlinePlateSwitch.isChecked
         cameraExecutor.execute {
             processBitmap(
                 bitmap = bitmap,
@@ -464,7 +468,8 @@ class MainActivity : AppCompatActivity() {
                 pitchForSolve = calibration.pitchDeg,
                 rollForSolve = calibration.rollDeg,
                 azimuthForSolve = calibration.azimuthDeg,
-                calibrationNote = calibration.note
+                calibrationNote = calibration.note,
+                useOfflinePlate = useOfflinePlate
             )
         }
     }
@@ -476,7 +481,8 @@ class MainActivity : AppCompatActivity() {
         pitchForSolve: Float,
         rollForSolve: Float,
         azimuthForSolve: Float?,
-        calibrationNote: String
+        calibrationNote: String,
+        useOfflinePlate: Boolean
     ) {
         try {
             val stars = starDetector.detectStars(bitmap)
@@ -504,7 +510,7 @@ class MainActivity : AppCompatActivity() {
                 hemisphereMode = if (hemisphereMode == Hemisphere.NORTH) "north" else "south",
                 dayOfYear = dayOfYearFloat
             )
-            if (patternResult.confidence < 0.18f) {
+            if (!useOfflinePlate && patternResult.confidence < 0.18f) {
                 runOnUiThread {
                     resultTextView.text = "Tarih/desen uyumu dusuk, tarih-saati kontrol et"
                     setProcessingState(false)
@@ -526,7 +532,9 @@ class MainActivity : AppCompatActivity() {
             var southPointerRefinement: SouthPointerRefinement? = null
             var southPoleCandidatesForOverlay: List<Pair<Float, Float>> = emptyList()
 
-            val (baseCandidatePoints, referenceConfidence, modeName) = if (hemisphereMode == Hemisphere.NORTH) {
+            val (baseCandidatePoints, referenceConfidence, modeName) = if (useOfflinePlate) {
+                Triple(emptyList(), 0f, "PlateSolve")
+            } else if (hemisphereMode == Hemisphere.NORTH) {
                 val scored = polarisFinder.scoreStars(stars, bitmap.height, bitmap.width).take(8)
                 if (scored.isEmpty()) {
                     Triple(emptyList(), 0f, "Polaris")
@@ -604,12 +612,22 @@ class MainActivity : AppCompatActivity() {
                     plateSolve.poleX in (-marginX)..(bitmap.width + marginX) &&
                         plateSolve.poleY in (-marginY)..(bitmap.height + marginY)
                 if (plausible) {
-                    val plateWeight = (0.35f + 0.65f * plateSolveConfidence).coerceIn(0.22f, 1f)
+                    val plateWeight = if (useOfflinePlate) 1.0f else (0.35f + 0.65f * plateSolveConfidence).coerceIn(0.22f, 1f)
+                    if (useOfflinePlate) {
+                        candidatePoints.clear()
+                    }
                     candidatePoints.add(Triple(plateSolve.poleX, plateSolve.poleY, plateWeight))
                 }
             }
+            if (useOfflinePlate && candidatePoints.isEmpty()) {
+                runOnUiThread {
+                    resultTextView.text = "Plate solve basarisiz, daha net fotograf dene"
+                    setProcessingState(false)
+                }
+                return
+            }
             var pointerConfidence = 0f
-            if (hemisphereMode == Hemisphere.SOUTH) {
+            if (!useOfflinePlate && hemisphereMode == Hemisphere.SOUTH) {
                 val initialSouthPole = candidatePoints.maxByOrNull { it.third }?.let { Pair(it.first, it.second) }
                 if (initialSouthPole != null) {
                     southPointerRefinement = refineSouthPoleWithPointers(
@@ -644,22 +662,26 @@ class MainActivity : AppCompatActivity() {
                 hemisphereMode = if (hemisphereMode == Hemisphere.NORTH) "north" else "south"
             )
             val combinedConfidence =
-                (
-                    if (hemisphereMode == Hemisphere.NORTH) {
-                        0.37f * referenceConfidence +
-                            0.25f * patternResult.confidence +
-                            0.20f * catalogConfidence +
-                            0.18f * plateSolveConfidence
-                    } else {
-                        0.32f * referenceConfidence +
-                            0.20f * patternResult.confidence +
-                            0.18f * catalogConfidence +
-                            0.15f * plateSolveConfidence +
-                            0.15f * pointerConfidence
-                    }
-                    )
-                    .coerceIn(0f, 1f)
-            if (hemisphereMode == Hemisphere.NORTH) {
+                if (useOfflinePlate) {
+                    (0.55f * plateSolveConfidence + 0.45f * catalogConfidence).coerceIn(0f, 1f)
+                } else {
+                    (
+                        if (hemisphereMode == Hemisphere.NORTH) {
+                            0.37f * referenceConfidence +
+                                0.25f * patternResult.confidence +
+                                0.20f * catalogConfidence +
+                                0.18f * plateSolveConfidence
+                        } else {
+                            0.32f * referenceConfidence +
+                                0.20f * patternResult.confidence +
+                                0.18f * catalogConfidence +
+                                0.15f * plateSolveConfidence +
+                                0.15f * pointerConfidence
+                        }
+                        )
+                        .coerceIn(0f, 1f)
+                }
+            if (!useOfflinePlate && hemisphereMode == Hemisphere.NORTH) {
                 val p = patternResult.matchedPattern.lowercase(Locale.US)
                 val northPatternOk = p.contains("ursa")
                 if (!northPatternOk && referenceConfidence < 0.48f) {
@@ -677,7 +699,7 @@ class MainActivity : AppCompatActivity() {
                     return
                 }
             }
-            if (hemisphereMode == Hemisphere.SOUTH && referenceConfidence < 0.32f) {
+            if (!useOfflinePlate && hemisphereMode == Hemisphere.SOUTH && referenceConfidence < 0.32f) {
                 runOnUiThread {
                     resultTextView.text = "Guney Haci geometri guveni dusuk, kalibrasyonu kontrol et"
                     setProcessingState(false)
@@ -685,7 +707,7 @@ class MainActivity : AppCompatActivity() {
                 return
             }
             val minCombinedConfidence = if (hemisphereMode == Hemisphere.NORTH) 0.28f else 0.22f
-            if (combinedConfidence < minCombinedConfidence) {
+            if (!useOfflinePlate && combinedConfidence < minCombinedConfidence) {
                 runOnUiThread {
                     resultTextView.text = "Guven dusuk, daha net bir gok fotografi dene"
                     setProcessingState(false)
@@ -704,7 +726,7 @@ class MainActivity : AppCompatActivity() {
                 southernHemisphere = hemisphereMode == Hemisphere.SOUTH
             )
             val nearPole = kotlin.math.abs(result.latitude) >= 88f
-            if (nearPole && (referenceConfidence < 0.55f || catalogConfidence < 0.45f || plateSolveConfidence < 0.35f)) {
+            if (nearPole && !useOfflinePlate && (referenceConfidence < 0.55f || catalogConfidence < 0.45f || plateSolveConfidence < 0.35f)) {
                 runOnUiThread {
                     resultTextView.text = "Kutup sonucu guvensiz, kalibrasyon/tarih hatali olabilir"
                     setProcessingState(false)
@@ -722,6 +744,7 @@ class MainActivity : AppCompatActivity() {
                     referenceConfidence = referenceConfidence,
                     patternConfidence = patternResult.confidence
                 )
+                val modeTag = if (useOfflinePlate) "Offline" else "Klasik"
                 resultTextView.text = String.format(
                     Locale.US,
                     "%s | Enlem %.4fÂ°%s | Hata +/-%.2fÂ° | Guven %.2f",
@@ -733,9 +756,10 @@ class MainActivity : AppCompatActivity() {
                 )
                 infoTextView.text = String.format(
                     Locale.US,
-                    "Kaynak: %s | %s | Takimyildiz: %s | Desen: %s | Tarih: %s | Katalog %.2f | Plate %.2f | Gun %d | Yildiz %d",
+                    "Kaynak: %s | %s | Mod: %s | Takimyildiz: %s | Desen: %s | Tarih: %s | Katalog %.2f | Plate %.2f | Gun %d | Yildiz %d",
                     sourceLabel,
                     calibrationNote,
+                    modeTag,
                     constellation,
                     patternResult.matchedPattern,
                     dateLabel,

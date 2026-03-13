@@ -3,6 +3,7 @@
 
 import sys
 import argparse
+from datetime import timezone
 from pathlib import Path
 
 from star_detection import detect_stars
@@ -10,7 +11,9 @@ from polaris_finder import find_polaris
 from latitude_solver import calculate_latitude_with_error_bounds
 from compass import CompassSensor
 from map_viewer import WorldMap, calculate_longitude_from_time
-from exif_reader import read_azimuth_from_exif, read_gps_location_from_exif
+from exif_reader import read_azimuth_from_exif, read_gps_location_from_exif, read_datetime_from_exif
+from offline_plate_solver import OfflinePlateSolver
+from time_utils import gmst_degrees, parse_iso_utc, parse_tz_offset, wrap_longitude_deg
 
 
 def print_header():
@@ -110,6 +113,21 @@ def main():
                         choices=['north', 'south'],
                         help='Yarımküre seçimi: north (Polaris) veya south (Sigma Octantis). Default: north')
 
+    parser.add_argument('--offline', action='store_true',
+                        help='Offline plate solver (tetra3) kullan')
+    parser.add_argument('--hfov', type=float, default=None,
+                        help='Offline solver icin yatay FOV (derece). Varsayilan --fov degeri kullanilir.')
+    parser.add_argument('--fov-error', type=float, default=5.0,
+                        help='Offline solver icin FOV hata payi (derece).')
+    parser.add_argument('--assume-zenith', action='store_true',
+                        help='Kamera tam yukari bakiyor kabul edilirse enlem/boylam hesapla')
+    parser.add_argument('--utc', type=str, default=None,
+                        help='UTC zaman damgasi (ISO 8601). Ornek: 2026-03-13T21:30:00Z')
+    parser.add_argument('--tz-offset', type=str, default=None,
+                        help='EXIF zamaninda timezone yoksa offset. Ornek: +03:00')
+    parser.add_argument('--db', type=str, default=None,
+                        help='tetra3 veritabani yolu (opsiyonel)')
+
     args = parser.parse_args()
 
     image_path = args.image
@@ -123,6 +141,58 @@ def main():
     if not Path(image_path).exists():
         print(f"❌ HATA: Dosya bulunamadı: {image_path}")
         sys.exit(1)
+
+    if args.offline:
+        print("🌌 Offline plate solve modu aktif")
+        hfov = args.hfov if args.hfov is not None else vertical_fov
+        solver = OfflinePlateSolver(database_path=args.db)
+        result = solver.solve_image(
+            image_path,
+            fov_estimate_deg=hfov,
+            fov_max_error_deg=args.fov_error,
+        )
+
+        if not result.success:
+            print("❌ Plate solve basarisiz.")
+            for warning in result.warnings:
+                print(f"   ⚠️ {warning}")
+            sys.exit(1)
+
+        print("✅ Plate solve tamamlandi")
+        print(f"RA:   {result.ra_deg:.6f}°")
+        print(f"Dec:  {result.dec_deg:.6f}°")
+        if result.roll_deg is not None:
+            print(f"Roll: {result.roll_deg:.3f}°")
+        if result.fov_deg is not None:
+            print(f"FOV:  {result.fov_deg:.3f}°")
+        if result.solve_time_ms is not None:
+            print(f"Sure: {result.solve_time_ms:.1f} ms")
+
+        if args.assume_zenith:
+            latitude = result.dec_deg
+            print(f"Enlem (zenith varsayimi): {latitude:.6f}°")
+
+            dt_utc = None
+            if args.utc:
+                dt_utc = parse_iso_utc(args.utc)
+            else:
+                dt_exif, offset = read_datetime_from_exif(image_path)
+                if dt_exif and offset:
+                    dt_utc = dt_exif.replace(tzinfo=timezone.utc) - parse_tz_offset(offset)
+                elif dt_exif and args.tz_offset:
+                    dt_utc = dt_exif.replace(tzinfo=timezone.utc) - parse_tz_offset(args.tz_offset)
+                elif dt_exif:
+                    print("⚠️ EXIF timezone yok. UTC varsayildi; boylam dogrulugu dusuk olabilir.")
+                    dt_utc = dt_exif.replace(tzinfo=timezone.utc)
+
+            if dt_utc is None:
+                print("⚠️ UTC zaman olmadan boylam hesaplanamadi. --utc veya EXIF kullanin.")
+            else:
+                gmst = gmst_degrees(dt_utc)
+                longitude = wrap_longitude_deg(result.ra_deg - gmst)
+                print(f"Boylam (zenith varsayimi): {longitude:.6f}°")
+
+        sys.exit(0)
 
     # Yarımküre bilgisi
     if hemisphere == 'north':

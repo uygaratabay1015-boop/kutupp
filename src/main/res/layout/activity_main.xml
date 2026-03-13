@@ -212,6 +212,16 @@
                 android:textSize="11sp" />
         </LinearLayout>
 
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/offlinePlateSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="Offline plate solve (katalog)"
+            android:textColor="@color/light_gray"
+            android:textSize="11sp"
+            android:fontFamily="monospace" />
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
