@@ -532,9 +532,7 @@ class MainActivity : AppCompatActivity() {
             var southPointerRefinement: SouthPointerRefinement? = null
             var southPoleCandidatesForOverlay: List<Pair<Float, Float>> = emptyList()
 
-            val (baseCandidatePoints, referenceConfidence, modeName) = if (useOfflinePlate) {
-                Triple(emptyList(), 0f, "PlateSolve")
-            } else if (hemisphereMode == Hemisphere.NORTH) {
+            val (baseCandidatePoints, referenceConfidence, modeNameBase) = if (hemisphereMode == Hemisphere.NORTH) {
                 val scored = polarisFinder.scoreStars(stars, bitmap.height, bitmap.width).take(8)
                 if (scored.isEmpty()) {
                     Triple(emptyList(), 0f, "Polaris")
@@ -598,6 +596,7 @@ class MainActivity : AppCompatActivity() {
                     Triple(weighted, conf, "Guney Haci")
                 }
             }
+            var modeName = modeNameBase
 
             val plateSolve = starCatalogMatcher.estimatePolePoint(
                 stars = stars,
@@ -612,22 +611,20 @@ class MainActivity : AppCompatActivity() {
                     plateSolve.poleX in (-marginX)..(bitmap.width + marginX) &&
                         plateSolve.poleY in (-marginY)..(bitmap.height + marginY)
                 if (plausible) {
-                    val plateWeight = if (useOfflinePlate) 1.0f else (0.35f + 0.65f * plateSolveConfidence).coerceIn(0.22f, 1f)
-                    if (useOfflinePlate) {
-                        candidatePoints.clear()
-                    }
+                    val plateWeight = (0.35f + 0.65f * plateSolveConfidence).coerceIn(0.22f, 1f)
                     candidatePoints.add(Triple(plateSolve.poleX, plateSolve.poleY, plateWeight))
                 }
             }
-            if (useOfflinePlate && candidatePoints.isEmpty()) {
-                runOnUiThread {
-                    resultTextView.text = "Plate solve basarisiz, daha net fotograf dene"
-                    setProcessingState(false)
-                }
-                return
+            val plateSolveOk = plateSolve != null && plateSolveConfidence >= 0.45f
+            if (useOfflinePlate && plateSolveOk) {
+                candidatePoints.clear()
+                candidatePoints.add(Triple(plateSolve!!.poleX, plateSolve.poleY, 1.0f))
+                modeName = "PlateSolve"
+            } else if (useOfflinePlate) {
+                modeName = "${modeNameBase} (Fallback)"
             }
             var pointerConfidence = 0f
-            if (!useOfflinePlate && hemisphereMode == Hemisphere.SOUTH) {
+            if (hemisphereMode == Hemisphere.SOUTH) {
                 val initialSouthPole = candidatePoints.maxByOrNull { it.third }?.let { Pair(it.first, it.second) }
                 if (initialSouthPole != null) {
                     southPointerRefinement = refineSouthPoleWithPointers(
@@ -662,7 +659,7 @@ class MainActivity : AppCompatActivity() {
                 hemisphereMode = if (hemisphereMode == Hemisphere.NORTH) "north" else "south"
             )
             val combinedConfidence =
-                if (useOfflinePlate) {
+                if (useOfflinePlate && plateSolveOk) {
                     (0.55f * plateSolveConfidence + 0.45f * catalogConfidence).coerceIn(0f, 1f)
                 } else {
                     (
@@ -744,7 +741,7 @@ class MainActivity : AppCompatActivity() {
                     referenceConfidence = referenceConfidence,
                     patternConfidence = patternResult.confidence
                 )
-                val modeTag = if (useOfflinePlate) "Offline" else "Klasik"
+                val modeTag = if (useOfflinePlate && plateSolveOk) "Offline" else if (useOfflinePlate) "Offline-Fallback" else "Klasik"
                 resultTextView.text = String.format(
                     Locale.US,
                     "%s | Enlem %.4fÂ°%s | Hata +/-%.2fÂ° | Guven %.2f",
