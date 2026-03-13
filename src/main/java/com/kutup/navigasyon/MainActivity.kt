@@ -81,6 +81,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private lateinit var previewView: PreviewView
+    private lateinit var previewSizeSwitch: SwitchCompat
     private lateinit var captureButton: Button
     private lateinit var galleryButton: Button
     private lateinit var calculateButton: Button
@@ -99,6 +100,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var manualRollInput: EditText
     private lateinit var horizonPickButton: Button
     private lateinit var offlinePlateSwitch: SwitchCompat
+    private var previewZoomed = false
 
     private lateinit var compass: CompassSensor
     private lateinit var starDetector: StarDetector
@@ -201,6 +203,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun initializeUI() {
         previewView = findViewById(R.id.previewView)
+        previewSizeSwitch = findViewById(R.id.previewSizeSwitch)
         captureButton = findViewById(R.id.captureButton)
         galleryButton = findViewById(R.id.galleryButton)
         calculateButton = findViewById(R.id.calculateButton)
@@ -259,6 +262,9 @@ class MainActivity : AppCompatActivity() {
             } else {
                 showHorizonPickerDialog(bmp)
             }
+        }
+        previewSizeSwitch.setOnCheckedChangeListener { _, checked ->
+            setPreviewZoom(checked)
         }
         calculateButton.setOnClickListener { onCalculatePressed() }
         showMapButton.setOnClickListener { showEstimatedLocationOnMap() }
@@ -337,6 +343,7 @@ class MainActivity : AppCompatActivity() {
                 camera = cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture)
                 updateVerticalFovFromCamera(camera)
                 captureButton.isEnabled = true
+                setPreviewZoom(previewSizeSwitch.isChecked)
                 updateCalculateButton()
             } catch (exc: Exception) {
                 Log.e(TAG, "Kamera baslatma hatasi", exc)
@@ -344,6 +351,24 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Kamera baslatilamadi", Toast.LENGTH_SHORT).show()
             }
         }, ContextCompat.getMainExecutor(this))
+    }
+
+    private fun setPreviewZoom(zoomed: Boolean) {
+        previewZoomed = zoomed
+        val ratio = if (zoomed) 1.6f else 1.0f
+        val cam = camera
+        if (cam == null) {
+            return
+        }
+        try {
+            val zoomState = cam.cameraInfo.zoomState.value
+            val minZoom = zoomState?.minZoomRatio ?: 1.0f
+            val maxZoom = zoomState?.maxZoomRatio ?: 1.0f
+            val target = (ratio).coerceIn(minZoom, maxZoom)
+            cam.cameraControl.setZoomRatio(target)
+        } catch (e: Exception) {
+            Log.w(TAG, "Zoom ayarlanamadi", e)
+        }
     }
 
     private fun updateVerticalFovFromCamera(cam: Camera?) {
