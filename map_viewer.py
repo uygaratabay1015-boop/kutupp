@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import subprocess
 import sys
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -19,9 +20,10 @@ class WorldMap:
             if sys.platform == 'win32':
                 os.startfile(path)
             elif sys.platform == 'darwin':
-                os.system(f'open "{path}"')
+                subprocess.run(['open', path], check=False)
             else:
-                os.system(f'xdg-open "{path}"')
+                subprocess.run(['xdg-open', path], check=False,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             print(f"   Haritayı manuel açın: {path}")
 
@@ -82,7 +84,9 @@ class WorldMap:
         ax.axhline(y=latitude, color='red', linestyle=':', linewidth=1.5, alpha=0.7, zorder=4)
         ax.axvline(x=longitude, color='blue', linestyle=':', linewidth=1.5, alpha=0.7, zorder=4)
 
-        hemisphere_label = "🔴 Kuzey Yarımküre" if hemisphere == 'north' else "🔵 Güney Yarımküre"
+        # Not: Matplotlib'in varsayilan fontu emoji icermez ("Glyph missing" uyarisi
+        # ve bos kutular uretiyordu); grafikte duz metin kullanilir.
+        hemisphere_label = "Kuzey Yarımküre" if hemisphere == 'north' else "Güney Yarımküre"
         star_label = "Polaris kullanıldı" if hemisphere == 'north' else "Sigma Octantis kullanıldı"
 
         ax.set_title(title, fontsize=14, fontweight='bold')
@@ -90,10 +94,10 @@ class WorldMap:
 
         info_text = (
             f"{hemisphere_label}\n"
-            f"⭐ {star_label}\n"
-            f"📍 Enlem:  {latitude:.4f}°\n"
-            f"📍 Boylam: {longitude:.4f}°\n"
-            f"🎯 Hata:   ±{lat_error:.2f}° / ±{lon_error:.2f}°"
+            f"Yıldız: {star_label}\n"
+            f"Enlem:  {latitude:.4f}°\n"
+            f"Boylam: {longitude:.4f}°\n"
+            f"Hata:   ±{lat_error:.2f}° / ±{lon_error:.2f}°"
         )
         ax.text(0.02, 0.97, info_text, transform=ax.transAxes,
                 fontsize=10, verticalalignment='top',
@@ -138,16 +142,27 @@ class WorldMap:
         self._open_file(output)
 
 
-def calculate_longitude_from_time(utc_hour: float, utc_minute: float = 0) -> tuple:
-    total_minutes = utc_hour * 60 + utc_minute
-    longitude = (total_minutes - 720) * (360 / 1440)
+def calculate_longitude_from_time(utc_hour: float, utc_minute: float = 0,
+                                  local_solar_hour: float = 0.0) -> tuple:
+    """
+    UTC saatinden kaba boylam tahmini.
 
-    if longitude > 180:
-        longitude -= 360
-    elif longitude < -180:
-        longitude += 360
+    Yalnizca UTC saatinden boylam bulunamaz; gozlemin YEREL GUNES saatini
+    (varsayilan: gece yarisi = 0.0) varsaymak gerekir:
 
-    lon_error = 2.0
+        boylam = 15 deg/saat * (yerel_gunes_saati - UTC_saati)
+
+    (Dogu boylamlarinda yerel saat UTC'den ileridir, bu yuzden isaret budur.
+    Eski formul (UTC - 12) * 15 isareti ters ve anlamsiz bir referans kullaniyordu.)
+    Yerel saat varsayimi +/-1 saat sapabilecegi icin hata payi 15 deg'dir.
+    """
+    utc_hours = (utc_hour * 60 + utc_minute) / 60.0
+    longitude = 15.0 * (local_solar_hour - utc_hours)
+
+    # [-180, 180] araligina sar
+    longitude = ((longitude + 180.0) % 360.0) - 180.0
+
+    lon_error = 15.0
     return round(longitude, 4), lon_error
 
 
