@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import math
 import sys
 import argparse
 from datetime import timezone
@@ -107,6 +108,9 @@ def main():
                         help='UTC saati (0-23). Boylam hesabı için gerekli.')
     parser.add_argument('--utc-minute', type=float, default=0,
                         help='UTC dakikası (0-59).')
+    parser.add_argument('--local-hour', type=float, default=0.0,
+                        help='Gözlemin varsayılan YEREL GÜNEŞ saati (0-24, default: 0 = gece yarısı). '
+                             'Boylam tahmini bu varsayıma dayanır.')
 
     # YENİ: Yarımküre seçimi
     parser.add_argument('--hemisphere', type=str, default='north',
@@ -144,8 +148,24 @@ def main():
 
     if args.offline:
         print("🌌 Offline plate solve modu aktif")
-        hfov = args.hfov if args.hfov is not None else vertical_fov
-        solver = OfflinePlateSolver(database_path=args.db)
+        if args.hfov is not None:
+            hfov = args.hfov
+        else:
+            # tetra3 yatay FOV bekler: dikey FOV'dan en-boy oranina gore turet.
+            try:
+                from PIL import Image
+                with Image.open(image_path) as _img:
+                    img_w, img_h = _img.size
+                hfov = math.degrees(
+                    2.0 * math.atan(math.tan(math.radians(vertical_fov) / 2.0) * img_w / img_h)
+                )
+            except Exception:
+                hfov = vertical_fov
+        try:
+            solver = OfflinePlateSolver(database_path=args.db)
+        except RuntimeError as exc:
+            print(f"❌ HATA: {exc}")
+            sys.exit(1)
         result = solver.solve_image(
             image_path,
             fov_estimate_deg=hfov,
@@ -203,9 +223,10 @@ def main():
     # Boylam
     if args.utc_hour is not None:
         longitude, lon_error = calculate_longitude_from_time(
-            args.utc_hour, args.utc_minute
+            args.utc_hour, args.utc_minute, args.local_hour
         )
         print(f"🕐 UTC Saati: {int(args.utc_hour):02d}:{int(args.utc_minute):02d}")
+        print(f"   Varsayılan yerel güneş saati: {args.local_hour:g}")
         print(f"   Hesaplanan Boylam: {longitude}° (±{lon_error}°)\n")
     else:
         longitude = 0.0
@@ -262,7 +283,9 @@ def main():
             image_height=image_shape[0],
             vertical_fov=vertical_fov,
             camera_tilt=camera_tilt,
-            hemisphere=hemisphere      # ← yarımküre geçiliyor
+            hemisphere=hemisphere,     # ← yarımküre geçiliyor
+            polaris_pixel_x=polaris[0],
+            image_width=image_shape[1]
         )
         print(f"   ✓ Enlem hesaplaması tamamlandı\n")
 

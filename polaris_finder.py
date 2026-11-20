@@ -23,8 +23,13 @@ def calculate_isolation_score(star, all_stars, image_height, image_width):
 
     distances.sort()
     avg_dist = np.mean(distances[:5]) if len(distances) >= 5 else np.mean(distances)
-    max_possible_dist = math.hypot(image_height, image_width)
-    return min(avg_dist / max_possible_dist, 1.0)
+    # En yakin 5 komsunun ortalama mesafesi gorüntü köşegeninin ancak ~%1-5'i olur;
+    # köşegene bölmek skoru ~0'a sıkıştırıp izolasyon ağırlığını etkisiz bırakıyordu.
+    # Köşegenin %10'una göre normalize et.
+    reference_dist = 0.10 * math.hypot(image_height, image_width)
+    if reference_dist <= 0:
+        return 0.5
+    return min(float(avg_dist) / reference_dist, 1.0)
 
 
 def calculate_height_score(y, image_height, hemisphere='north'):
@@ -85,7 +90,8 @@ def find_polaris(stars, image_shape, top_candidates=50, hemisphere='north'):
         hemisphere: 'north' veya 'south'
     """
     if not stars:
-        return None, 0, {'error': 'Yıldız bulunamadı'}
+        return None, 0, {'error': 'Yıldız bulunamadı', 'total_candidates': 0,
+                         'scores': [], 'best_score': 0}
 
     height = image_shape[0]
     width = image_shape[1]

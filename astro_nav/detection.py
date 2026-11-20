@@ -17,7 +17,26 @@ class StarDetector:
         if image_bgr is None or image_bgr.size == 0:
             raise ValueError("image_bgr is empty")
 
-        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        # Gri tonlu (2B), tek kanalli veya BGRA girdileri de kabul et.
+        if image_bgr.ndim == 2:
+            gray = image_bgr
+        elif image_bgr.shape[2] == 1:
+            gray = image_bgr[:, :, 0]
+        elif image_bgr.shape[2] == 4:
+            gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGRA2GRAY)
+        else:
+            gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        if gray.dtype != np.uint8:
+            gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+        # Blob alan sinirlari ~1920 px referansina gore verilmistir; telefon
+        # fotograflarinda (12 MP+) yildizlar daha buyuk gorunur ve sabit 180 px siniri
+        # tum yildizlari eliyordu. Alan limitlerini cozunurlukle olcekle.
+        scale = max(1.0, max(gray.shape[:2]) / 1920.0)
+        area_scale = scale * scale
+        min_area = self.config.min_blob_area_px * area_scale
+        max_area = self.config.max_blob_area_px * area_scale
+
         denoised = cv2.GaussianBlur(gray, (3, 3), 0)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(denoised)
@@ -35,7 +54,7 @@ class StarDetector:
         stars: List[DetectedStar] = []
         for idx in range(1, num_labels):
             area = int(stats[idx, cv2.CC_STAT_AREA])
-            if area < self.config.min_blob_area_px or area > self.config.max_blob_area_px:
+            if area < min_area or area > max_area:
                 continue
             x = float(centroids[idx][0])
             y = float(centroids[idx][1])

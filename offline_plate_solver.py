@@ -18,12 +18,27 @@ class PlateSolveResult:
     raw: Optional[Dict[str, Any]]
 
 
-def _maybe_rad_to_deg(value: Optional[float], max_abs_rad: float) -> Optional[float]:
+def _get_ci(result: Dict[str, Any], *names: str) -> Any:
+    """Sozlukten anahtar degeri al (buyuk/kucuk harf duyarsiz).
+
+    tetra3 'RA', 'Dec', 'Roll', 'FOV' anahtarlarini kullanir; eski kod kucuk harfle
+    ('ra', 'dec') ariyordu ve cozum her zaman basarisiz sayiliyordu.
+    """
+    lowered = {str(k).lower(): v for k, v in result.items()}
+    for name in names:
+        value = lowered.get(name.lower())
+        if value is not None:
+            return value
+    return None
+
+
+def _to_float(value: Any) -> Optional[float]:
     if value is None:
         return None
-    if abs(value) <= max_abs_rad + 1e-6:
-        return value * 180.0 / 3.141592653589793
-    return value
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class OfflinePlateSolver:
@@ -47,9 +62,12 @@ class OfflinePlateSolver:
         fov_max_error_deg: Optional[float] = None,
         extract_kwargs: Optional[Dict[str, Any]] = None,
     ) -> PlateSolveResult:
-        image = Image.open(image_path)
+        # Renkli (RGB/RGBA/palet) goruntuler yildiz cikarmada hata verebilir;
+        # tek kanalli gri tona cevir ve dosya tutacagini kapat.
+        with Image.open(image_path) as src:
+            image = src.convert("L")
         kwargs = extract_kwargs or {}
-        result: Dict[str, Any] = self._solver.solve_from_image(
+        result: Optional[Dict[str, Any]] = self._solver.solve_from_image(
             image,
             fov_estimate=fov_estimate_deg,
             fov_max_error=fov_max_error_deg,
@@ -57,31 +75,31 @@ class OfflinePlateSolver:
         )
 
         warnings: list[str] = []
-        if result is None or result.get("ra") is None or result.get("dec") is None:
+        ra = _to_float(_get_ci(result, "ra")) if isinstance(result, dict) else None
+        dec = _to_float(_get_ci(result, "dec")) if isinstance(result, dict) else None
+        if ra is None or dec is None:
             warnings.append("Cozum basarisiz. FOV tahmini, veritabanini ve yildiz kalitesini kontrol et.")
+            solve_time = _to_float(_get_ci(result, "t_solve")) if isinstance(result, dict) else None
             return PlateSolveResult(
                 success=False,
                 ra_deg=None,
                 dec_deg=None,
                 roll_deg=None,
                 fov_deg=None,
-                solve_time_ms=result.get("T_solve") if isinstance(result, dict) else None,
+                solve_time_ms=solve_time,
                 warnings=warnings,
                 raw=result if isinstance(result, dict) else None,
             )
 
-        ra = _maybe_rad_to_deg(result.get("ra"), max_abs_rad=6.283185307179586)
-        dec = _maybe_rad_to_deg(result.get("dec"), max_abs_rad=1.5707963267948966)
-        roll = _maybe_rad_to_deg(result.get("roll"), max_abs_rad=3.141592653589793)
-        fov = _maybe_rad_to_deg(result.get("fov"), max_abs_rad=6.283185307179586)
-
+        # tetra3 RA/Dec/Roll/FOV degerlerini zaten DERECE olarak dondurur. Eski kod
+        # kucuk degerleri "radyan" sanip 57.3 ile carpiyordu (ornegin RA=5 deg bozuluyordu).
         return PlateSolveResult(
             success=True,
             ra_deg=ra,
             dec_deg=dec,
-            roll_deg=roll,
-            fov_deg=fov,
-            solve_time_ms=result.get("T_solve"),
+            roll_deg=_to_float(_get_ci(result, "roll")),
+            fov_deg=_to_float(_get_ci(result, "fov")),
+            solve_time_ms=_to_float(_get_ci(result, "t_solve")),
             warnings=warnings,
             raw=result,
         )

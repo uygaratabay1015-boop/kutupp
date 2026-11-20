@@ -7,6 +7,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ImageFormat
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.hardware.camera2.CameraCharacteristics
@@ -192,6 +193,18 @@ class MainActivity : AppCompatActivity() {
 
         compass.startListening()
         updateModeText()
+    }
+
+    // Sensorler arka planda calismaya devam edip bataryayi tuketmesin diye
+    // yalnizca on plandayken dinlenir (startListening/stopListening idempotent).
+    override fun onResume() {
+        super.onResume()
+        if (::compass.isInitialized) compass.startListening()
+    }
+
+    override fun onPause() {
+        if (::compass.isInitialized) compass.stopListening()
+        super.onPause()
     }
 
     override fun onDestroy() {
@@ -747,7 +760,7 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 val hemisphereLabel = if (result.latitude >= 0f) "K" else "G"
                 val sourceLabel = if (source == CaptureSource.CAMERA) "KAMERA" else "GALERI"
-                val estimatedLongitude = calculateLongitudeFromUtcTime(observationDateTime)
+                val estimatedLongitude = estimateLongitudeFromTimeZone(observationDateTime)
                 val constellation = constellationLabel(
                     patternName = patternResult.matchedPattern,
                     mode = hemisphereMode,
@@ -757,7 +770,7 @@ class MainActivity : AppCompatActivity() {
             val modeTag = if (preferPlateSolve && plateSolveOk) "PlateSolve" else if (useOfflinePlate) "Offline-Fallback" else "Klasik"
                 resultTextView.text = String.format(
                     Locale.US,
-                    "%s | Enlem %.4fÂ°%s | Hata +/-%.2fÂ° | Guven %.2f",
+                    "%s | Enlem %.4f°%s | Hata +/-%.2f° | Guven %.2f",
                     modeName,
                     abs(result.latitude),
                     hemisphereLabel,
@@ -1003,12 +1016,17 @@ class MainActivity : AppCompatActivity() {
         MiniMapView.showFullscreenMap(this, markers, label)
     }
 
-    private fun calculateLongitudeFromUtcTime(dateTime: LocalDateTime): Double {
-        val totalMinutes = dateTime.hour * 60.0 + dateTime.minute.toDouble()
-        var longitude = (totalMinutes - 720.0) * (360.0 / 1440.0)
-        if (longitude > 180.0) longitude -= 360.0
-        if (longitude < -180.0) longitude += 360.0
-        return longitude
+    /**
+     * Boylam, cihazin saat diliminin STANDART ofsetinden (15 derece / saat) tahmin edilir.
+     *
+     * Eski kod gun ici saati dogrudan boylama ceviriyordu (ornegin Istanbul'da 22:00 -> 180 derece);
+     * ustelik `observationDateTime` UTC degil yerel saattir. Saat dilimi tabanli tahmin
+     * yaklasik +/-7.5 derece (yaz saati uygulamasi dikkate alinmaz) dogruluktadir.
+     */
+    private fun estimateLongitudeFromTimeZone(dateTime: LocalDateTime): Double {
+        val zone = java.time.ZoneId.systemDefault()
+        val offsetSeconds = zone.rules.getStandardOffset(dateTime.atZone(zone).toInstant()).totalSeconds
+        return (offsetSeconds / 3600.0 * 15.0).coerceIn(-180.0, 180.0)
     }
 
     private fun nearestStation(latitude: Double, longitude: Double): PolarStation? {
@@ -1234,6 +1252,33 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun imageToBitmap(image: ImageProxy): Bitmap {
+        // ImageCapture.takePicture(OnImageCapturedCallback) varsayilan olarak JPEG dondurur
+        // (tek plane, sikistirilmis bayt). Onu YUV Y-duzlemi gibi okumak bozuk goruntu /
+        // IndexOutOfBounds uretiyordu; JPEG ise BitmapFactory ile coz.
+        if (image.format == ImageFormat.JPEG && image.planes.size == 1) {
+            val buffer = image.planes[0].buffer
+            buffer.rewind()
+            val bytes = ByteArray(buffer.remaining())
+            buffer.get(bytes)
+
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            var sample = 1
+            var w = bounds.outWidth
+            var h = bounds.outHeight
+            while (w > 1600 || h > 1600) {
+                w /= 2
+                h /= 2
+                sample *= 2
+            }
+            val opts = BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+            return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                ?: throw IllegalStateException("JPEG cozulemedi")
+        }
+
         val yPlane = image.planes[0]
         val yBuffer = yPlane.buffer
         val yRowStride = yPlane.rowStride
