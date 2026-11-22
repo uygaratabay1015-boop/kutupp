@@ -1,0 +1,208 @@
+"""Zenit tabanli konum cozucu (dunyanin her yerinde calisir).
+
+Fikir
+-----
+1. Plate solve, kameranin gokyuzundeki yonelimini verir: kamera -> ICRS (J2000) donusumu.
+2. Telefonun yercekimi sensoru, yerel dikey (zenit) yonunu KAMERA eksenlerinde verir.
+3. Zenit yonunu ICRS'e cevirip "tarih ekvatoruna" (presesyon + nutasyon) tasiyinca:
+       enlem  = zenitin deklinasyonu
+       boylam = zenitin sag acikligi - GAST (gorunur yildiz zamani)   [dogu +]
+   Polaris'e, yildiz desenine veya yarimkureye BAGLI DEGILDIR.
+
+Eksen kurali (OpenCV): kamera x = goruntu sagi, y = goruntu asagisi, z = bakis yonu (sag-el).
+Kullanici girdileri: yonelim (3x3 matris veya RA/Dec/Roll), yukari-vektor (kamera ekseninde,
+zenite dogru, birim), UTC zamani.
+
+Hata kaynaklari (kabaca): sensor egimi (0.3-1 deg => 30-110 km) >> plate solve (~0.02 deg) >>
+zaman (1 sn = 0.4 km). Bkz. `monte_carlo_error`.
+Ihmal edilenler: sapma (aberasyon, <=20"), UT1-UTC (<=0.9 sn), dikey sapmasi (~10"),
+atmosferik kirilma (plate solve'a katkisi kucuk).
+"""
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Iterable, Optional, Sequence
+
+import numpy as np
+
+ARCSEC = math.pi / (180.0 * 3600.0)
+EARTH_RADIUS_KM = 6371.0088
+
+
+# ---------------------------------------------------------------- zaman / astronomi
+
+def julian_date_utc(when: datetime) -> float:
+    """UTC zamanindan Julian Date (UT1 ~ UTC kabul edilir)."""
+    if when.tzinfo is None:
+        raise ValueError("Zaman dilimi bilgisi (UTC) gerekli: datetime(..., tzinfo=timezone.utc)")
+    when = when.astimezone(timezone.utc)
+    y, m = when.year, when.month
+    if m <= 2:
+        y -= 1
+        m += 12
+    a = y // 100
+    b = 2 - a + a // 4
+    day_fraction = (when.hour + (when.minute + (when.second + when.microsecond / 1e6) / 60.0) / 60.0) / 24.0
+    return (math.floor(365.25 * (y + 4716)) + math.floor(30.6001 * (m + 1))
+            + when.day + day_fraction + b - 1524.5)
+
+
+def _rx(a: float) -> np.ndarray:
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[1, 0, 0], [0, c, s], [0, -s, c]])
+
+
+def _rz(a: float) -> np.ndarray:
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[c, s, 0], [-s, c, 0], [0, 0, 1]])
+
+
+def _poly(coeffs: Sequence[float], t: float) -> float:
+    total = 0.0
+    for c in reversed(coeffs):
+        total = total * t + c
+    return total
+
+
+def nutation(t: float) -> tuple[float, float]:
+    """(dpsi, deps) radyan; Meeus dusuk-duzey seri (~0.5 yay-saniyesi)."""
+    omega = math.radians(125.04452 - 1934.136261 * t)
+    l_sun = math.radians(280.4665 + 36000.7698 * t)
+    l_moon = math.radians(218.3165 + 481267.8813 * t)
+    dpsi = (-17.20 * math.sin(omega) - 1.32 * math.sin(2 * l_sun)
+            - 0.23 * math.sin(2 * l_moon) + 0.21 * math.sin(2 * omega)) * ARCSEC
+    deps = (9.20 * math.cos(omega) + 0.57 * math.cos(2 * l_sun)
+            + 0.10 * math.cos(2 * l_moon) - 0.09 * math.cos(2 * omega)) * ARCSEC
+    return dpsi, deps
+
+
+def precession_nutation_matrix(jd: float) -> np.ndarray:
+    """ICRS(J2000) -> gercek ekvator/ekinoks (tarih). IAU 2006 Fukushima-Williams + nutasyon."""
+    t = (jd - 2451545.0) / 36525.0
+    gamb = _poly([-0.052928, 10.556378, 0.4932044, -0.00031238, -0.000002788, 0.0000000260], t) * ARCSEC
+    phib = _poly([84381.412819, -46.811016, 0.0511268, 0.00053289, -0.000000440, -0.0000000176], t) * ARCSEC
+    psib = _poly([-0.041775, 5038.481484, 1.5584175, -0.00018522, -0.000026452, -0.0000000148], t) * ARCSEC
+    epsa = _poly([84381.406, -46.836769, -0.0001831, 0.00200340, -0.000000576, -0.0000000434], t) * ARCSEC
+    dpsi, deps = nutation(t)
+    return _rx(-(epsa + deps)) @ _rz(-(psib + dpsi)) @ _rx(phib) @ _rz(gamb)
+
+
+def greenwich_apparent_sidereal_time(jd: float) -> float:
+    """GAST (radyan, [0, 2pi)). ERA + presesyon polinomu + nutasyon (esitlik of ekinokslar)."""
+    tu = jd - 2451545.0
+    t = tu / 36525.0
+    era = 2 * math.pi * ((0.7790572732640 + 1.00273781191135448 * tu) % 1.0)
+    gmst = era + _poly([0.014506, 4612.156534, 1.3915817, -0.00000044,
+                        -0.000029956, -0.0000000368], t) * ARCSEC
+    dpsi, _ = nutation(t)
+    epsa = _poly([84381.406, -46.836769, -0.0001831, 0.00200340], t) * ARCSEC
+    return (gmst + dpsi * math.cos(epsa)) % (2 * math.pi)
+
+
+# ---------------------------------------------------------------- yonelim
+
+def rotation_from_radec_roll(ra_deg: float, dec_deg: float, roll_deg: float,
+                             roll_sign: float = 1.0) -> np.ndarray:
+    """Kamera -> ICRS donusum matrisi (sutunlar: kamera x, y, z eksenleri, ICRS'te).
+
+    Roll tanimi: goruntu-yukarisinin "konum acisi" (kuzeyden doguya dogru, derece).
+    NOT: plate solver'in (tetra3 vb.) roll tanimi/isareti farkli olabilir; `roll_sign=-1`
+    ile cevrilebilir. Gercek bir cozum uzerinde dogrulanmalidir (bkz. docs/ZENITH_FIX.md).
+    """
+    a, d = math.radians(ra_deg), math.radians(dec_deg)
+    th = math.radians(roll_deg) * roll_sign
+    f = np.array([math.cos(d) * math.cos(a), math.cos(d) * math.sin(a), math.sin(d)])
+    north = np.array([-math.sin(d) * math.cos(a), -math.sin(d) * math.sin(a), math.cos(d)])
+    east = np.array([-math.sin(a), math.cos(a), 0.0])
+    up = math.cos(th) * north + math.sin(th) * east
+    x = np.cross(f, up)          # goruntu sagi
+    return np.column_stack([x, -up, f])
+
+
+@dataclass(frozen=True)
+class PositionFix:
+    latitude_deg: float
+    longitude_deg: float      # dogu +, [-180, 180)
+    zenith_ra_deg: float
+    zenith_dec_deg: float
+
+
+def _unit(v: Sequence[float]) -> np.ndarray:
+    v = np.asarray(v, dtype=float)
+    n = np.linalg.norm(v)
+    if n == 0 or not np.isfinite(n):
+        raise ValueError("Gecersiz (sifir/NaN) vektor")
+    return v / n
+
+
+def solve_position(cel_from_cam: np.ndarray, up_cam: Sequence[float], when_utc: datetime) -> PositionFix:
+    """Konumu bul. `up_cam`: zenit yonu, kamera eksenlerinde (yercekimi sensorunun tersi)."""
+    r = np.asarray(cel_from_cam, dtype=float)
+    if r.shape != (3, 3) or abs(np.linalg.det(r) - 1.0) > 1e-3:
+        raise ValueError("Yonelim matrisi gecerli bir 3x3 dondurme matrisi olmali")
+    jd = julian_date_utc(when_utc)
+    zen_date = precession_nutation_matrix(jd) @ (r @ _unit(up_cam))
+    lat = math.degrees(math.asin(max(-1.0, min(1.0, zen_date[2]))))
+    ra = math.atan2(zen_date[1], zen_date[0])
+    lon = (math.degrees(ra - greenwich_apparent_sidereal_time(jd)) + 180.0) % 360.0 - 180.0
+    return PositionFix(lat, lon, math.degrees(ra) % 360.0,
+                       math.degrees(math.asin(max(-1.0, min(1.0, zen_date[2])))))
+
+
+# ---------------------------------------------------------------- yardimcilar
+
+def great_circle_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dl = math.radians(lon2 - lon1)
+    h = math.sin((p2 - p1) / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * EARTH_RADIUS_KM * math.asin(min(1.0, math.sqrt(h)))
+
+
+def _geo_unit(lat: float, lon: float) -> np.ndarray:
+    la, lo = math.radians(lat), math.radians(lon)
+    return np.array([math.cos(la) * math.cos(lo), math.cos(la) * math.sin(lo), math.sin(la)])
+
+
+def combine_fixes(fixes: Iterable[PositionFix]) -> PositionFix:
+    """Birden cok kareyi birlestir (kuresel ortalama; +/-180 sarmasindan etkilenmez)."""
+    vs = [_geo_unit(f.latitude_deg, f.longitude_deg) for f in fixes]
+    if not vs:
+        raise ValueError("En az bir cozum gerekli")
+    m = _unit(np.sum(vs, axis=0))
+    lat = math.degrees(math.asin(m[2]))
+    lon = math.degrees(math.atan2(m[1], m[0]))
+    return PositionFix(lat, lon, float("nan"), float("nan"))
+
+
+def _small_rotation(rng: np.random.Generator, sigma_rad: float) -> np.ndarray:
+    w = rng.normal(0.0, sigma_rad, 3)
+    k = np.array([[0, -w[2], w[1]], [w[2], 0, -w[0]], [-w[1], w[0], 0]])
+    u, _, vt = np.linalg.svd(np.eye(3) + k)   # en yakin dondurme matrisi
+    return u @ vt
+
+
+def monte_carlo_error(cel_from_cam: np.ndarray, up_cam: Sequence[float], when_utc: datetime,
+                      sigma_tilt_deg: float = 0.5, sigma_solve_deg: float = 0.03,
+                      sigma_time_s: float = 1.0, n: int = 2000, seed: int = 0) -> dict:
+    """Sensor/cozum/zaman belirsizligine gore konum hatasi dagilimi (km)."""
+    rng = np.random.default_rng(seed)
+    nominal = solve_position(cel_from_cam, up_cam, when_utc)
+    up0 = _unit(up_cam)
+    errs = []
+    from datetime import timedelta
+    for _ in range(n):
+        up = _small_rotation(rng, math.radians(sigma_tilt_deg)) @ up0
+        r = _small_rotation(rng, math.radians(sigma_solve_deg)) @ cel_from_cam
+        t = when_utc + timedelta(seconds=float(rng.normal(0.0, sigma_time_s)))
+        f = solve_position(r, up, t)
+        errs.append(great_circle_km(nominal.latitude_deg, nominal.longitude_deg,
+                                    f.latitude_deg, f.longitude_deg))
+    errs = np.asarray(errs)
+    return {
+        "median_km": float(np.median(errs)),
+        "p68_km": float(np.percentile(errs, 68)),
+        "p95_km": float(np.percentile(errs, 95)),
+        "nominal": nominal,
+    }
