@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional, Sequence
 
 import numpy as np
@@ -191,7 +191,6 @@ def monte_carlo_error(cel_from_cam: np.ndarray, up_cam: Sequence[float], when_ut
     nominal = solve_position(cel_from_cam, up_cam, when_utc)
     up0 = _unit(up_cam)
     errs = []
-    from datetime import timedelta
     for _ in range(n):
         up = _small_rotation(rng, math.radians(sigma_tilt_deg)) @ up0
         r = _small_rotation(rng, math.radians(sigma_solve_deg)) @ cel_from_cam
@@ -206,3 +205,64 @@ def monte_carlo_error(cel_from_cam: np.ndarray, up_cam: Sequence[float], when_ut
         "p95_km": float(np.percentile(errs, 95)),
         "nominal": nominal,
     }
+
+
+# ---------------------------------------------------------------- girdi yardimcilari
+
+def up_from_tilt(pitch_deg: float, roll_deg: float = 0.0) -> np.ndarray:
+    """Egim acilarindan zenit yonu (kamera ekseninde: x sag, y asagi, z bakis).
+
+    pitch_deg: bakis yonunun ufuk ustu yuksekligi (ufka bakis 0, zenite bakis 90).
+    roll_deg : kamera ekseni etrafinda donus; + = saat yonu (sag taraf asagi egik).
+    """
+    p, r = math.radians(pitch_deg), math.radians(roll_deg)
+    return _unit([-math.sin(r) * math.cos(p), -math.cos(r) * math.cos(p), math.sin(p)])
+
+
+def up_from_gravity(sensor_xyz: Sequence[float], sensor_points_up: bool = True) -> np.ndarray:
+    """Ivmeolcer/yercekimi okumasindan zenit yonu (zaten kamera ekseninde olmali).
+
+    Android'de duran cihazda TYPE_ACCELEROMETER / TYPE_GRAVITY yukari bakar
+    (sensor_points_up=True). Asagi bakan sensorler icin False verin.
+    """
+    v = _unit(sensor_xyz)
+    return v if sensor_points_up else -v
+
+
+def boresight_altitude_deg(cel_from_cam: np.ndarray, up_cam: Sequence[float]) -> float:
+    """Kameranin ufuk ustu yuksekligi: bakis ekseni (0,0,1) ile zenit arasindaki aciya gore."""
+    u = _unit(up_cam)
+    return math.degrees(math.asin(max(-1.0, min(1.0, float(u[2])))))
+
+
+def quality_warnings(cel_from_cam: np.ndarray, up_cam: Sequence[float],
+                     claimed_utc: datetime, now_utc: Optional[datetime] = None) -> list[str]:
+    """Sonucu bozabilecek durumlar icin uyarilar (dunyanin her yerinde gecerli)."""
+    warnings: list[str] = []
+    alt = boresight_altitude_deg(cel_from_cam, up_cam)
+    if alt < 0:
+        warnings.append("Kamera ufkun ALTINA bakiyor: egim/isaret hatasi olabilir.")
+    elif alt < 10:
+        warnings.append("Kamera ufka cok yakin (<10 derece): kirilma plate solve'u bozabilir.")
+    if abs(np.linalg.norm(np.asarray(up_cam, dtype=float)) - 1.0) > 0.05:
+        warnings.append("Yerçekimi vektoru birim degil (cihaz ivmeleniyor olabilir); sabit tutun.")
+    if now_utc is not None and claimed_utc > now_utc + timedelta(minutes=5):
+        warnings.append("Gozlem zamani gelecekte: saat/zaman dilimi hatasi olabilir.")
+    if claimed_utc.tzinfo is None:
+        warnings.append("Zaman dilimi yok: UTC varsayildi.")
+    return warnings
+
+
+def choose_roll_sign(ra_deg: float, dec_deg: float, roll_deg: float, up_cam: Sequence[float],
+                     when_utc: datetime, known_lat: float, known_lon: float) -> dict:
+    """Bilinen konumdan cekilmis bir fotografla plate solver'in roll isaretini belirle.
+
+    Iki isaret icin de konumu hesaplar; dogru konuma yakin olan dogru kuraldir.
+    """
+    out = {}
+    for sign in (1.0, -1.0):
+        fix = solve_position(rotation_from_radec_roll(ra_deg, dec_deg, roll_deg, sign), up_cam, when_utc)
+        out[sign] = great_circle_km(known_lat, known_lon, fix.latitude_deg, fix.longitude_deg)
+    best = min(out, key=out.get)
+    return {"best_roll_sign": best, "error_km": out[best], "other_error_km": out[-best],
+            "decisive": out[-best] > 5 * max(out[best], 1.0)}

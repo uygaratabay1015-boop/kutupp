@@ -142,3 +142,48 @@ class ErrorBudgetTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InputHelpersTest(unittest.TestCase):
+    def test_up_from_tilt_geometry(self) -> None:
+        from astro_nav.zenith_fix import up_from_tilt, boresight_altitude_deg
+        np.testing.assert_allclose(up_from_tilt(0, 0), [0, -1, 0], atol=1e-12)      # ufuk: zenit = goruntu yukarisi
+        np.testing.assert_allclose(up_from_tilt(90, 0), [0, 0, 1], atol=1e-12)      # zenite bakis
+        self.assertLess(up_from_tilt(30, 20)[0], 0)                                 # saat yonu roll: zenit sola kayar
+        self.assertAlmostEqual(boresight_altitude_deg(np.eye(3), up_from_tilt(37, 11)), 37.0, places=6)
+
+    def test_gravity_sign(self) -> None:
+        from astro_nav.zenith_fix import up_from_gravity
+        np.testing.assert_allclose(up_from_gravity([0, -9.81, 0]), [0, -1, 0])
+        np.testing.assert_allclose(up_from_gravity([0, 9.81, 0], sensor_points_up=False), [0, -1, 0])
+
+    def test_roll_sign_calibration_picks_right_sign(self) -> None:
+        from astro_nav.zenith_fix import choose_roll_sign
+        when = datetime(2026, 11, 20, 21, 5, tzinfo=timezone.utc)
+        lat, lon = -33.87, 151.21
+        r, up = _simulate(lat, lon, when, 200.0, 40.0, 25.0)
+        # "solver" r'den RA/Dec/Roll cikarir; kural +1 ile uretildi
+        f = r[:, 2]
+        ra = math.degrees(math.atan2(f[1], f[0])) % 360
+        dec = math.degrees(math.asin(f[2]))
+        a, d = math.radians(ra), math.radians(dec)
+        north = np.array([-math.sin(d) * math.cos(a), -math.sin(d) * math.sin(a), math.cos(d)])
+        east = np.array([-math.sin(a), math.cos(a), 0.0])
+        u = -r[:, 1]
+        roll = math.degrees(math.atan2(np.dot(u, east), np.dot(u, north)))
+        res = choose_roll_sign(ra, dec, roll, up, when, lat, lon)
+        self.assertEqual(res["best_roll_sign"], 1.0)
+        self.assertLess(res["error_km"], 0.05)
+        self.assertTrue(res["decisive"])
+        # tersine uretilmis cozum -1 secilmeli
+        res2 = choose_roll_sign(ra, dec, -roll, up, when, lat, lon)
+        self.assertEqual(res2["best_roll_sign"], -1.0)
+
+    def test_warnings(self) -> None:
+        from astro_nav.zenith_fix import quality_warnings, up_from_tilt
+        when = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        w = quality_warnings(np.eye(3), up_from_tilt(-5, 0), when, when)
+        self.assertTrue(any("ALTINA" in m for m in w))
+        w = quality_warnings(np.eye(3), up_from_tilt(5, 0), when, when)
+        self.assertTrue(any("ufka cok yakin" in m for m in w))
+        self.assertEqual(quality_warnings(np.eye(3), up_from_tilt(45, 0), when, when), [])
