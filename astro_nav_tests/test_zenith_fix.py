@@ -187,3 +187,70 @@ class InputHelpersTest(unittest.TestCase):
         w = quality_warnings(np.eye(3), up_from_tilt(5, 0), when, when)
         self.assertTrue(any("ufka cok yakin" in m for m in w))
         self.assertEqual(quality_warnings(np.eye(3), up_from_tilt(45, 0), when, when), [])
+
+
+class TiltCalibrationTest(unittest.TestCase):
+    def _biased(self, lat, lon, when, az, alt, roll, bias_rot, rng, noise_deg):
+        from astro_nav.zenith_fix import _small_rotation
+        r, up = _simulate(lat, lon, when, az, alt, roll)
+        up_meas = bias_rot @ up
+        if noise_deg:
+            up_meas = _small_rotation(rng, math.radians(noise_deg)) @ up_meas
+        return r, up, up_meas
+
+    def test_bias_removed_and_worldwide_error_drops(self) -> None:
+        from astro_nav.zenith_fix import (apply_tilt_offset, calibrate_tilt_offset,
+                                          great_circle_km)
+        rng = np.random.default_rng(3)
+        # Sabit sensor-kamera hizasizligi: ~0.9 derece
+        w = np.radians([0.6, -0.5, 0.3]); k = np.array([[0, -w[2], w[1]], [w[2], 0, -w[0]], [-w[1], w[0], 0]])
+        bias = np.eye(3) + k + k @ k / 2
+        u, _, vt = np.linalg.svd(bias); bias = u @ vt
+
+        t0 = datetime(2026, 11, 20, 21, 5, tzinfo=timezone.utc)
+        r, _, meas = self._biased(41.0082, 28.9784, t0, 150.0, 45.0, 8.0, bias, rng, 0.0)
+        from astro_nav.zenith_fix import true_up_cam
+        cal = calibrate_tilt_offset([(r, meas, t0, 41.0082, 28.9784)])
+        self.assertLess(cal["residual_deg"], 1e-6)
+        self.assertAlmostEqual(cal["offset_deg"], math.degrees(math.acos((np.trace(bias) - 1) / 2)), delta=0.2)
+
+        before, after = [], []
+        for lat, lon in [(-33.87, 151.21), (64.14, -21.9), (-17.7, 179.9), (-0.18, -78.47), (35.0, 139.0)]:
+            when = t0 + timedelta(hours=float(rng.uniform(0, 8)), days=float(rng.integers(0, 200)))
+            r2, _, m2 = self._biased(lat, lon, when, rng.uniform(0, 360), rng.uniform(25, 75),
+                                     rng.uniform(-40, 40), bias, rng, 0.0)
+            a = solve_position(r2, m2, when)
+            b = solve_position(r2, apply_tilt_offset(cal["Q"], m2), when)
+            before.append(great_circle_km(lat, lon, a.latitude_deg, a.longitude_deg))
+            after.append(great_circle_km(lat, lon, b.latitude_deg, b.longitude_deg))
+        self.assertGreater(min(before), 40.0)          # kalibrasyonsuz: ~100 km
+        # Tek kare, sapmanin zenit ekseni etrafindaki bileseni goremez (gozlenemez);
+        # yine de ortalama hata kalibrasyonsuzun yarisindan azina iner.
+        self.assertLess(float(np.mean(after)), 0.5 * float(np.mean(before)))
+
+    def test_multi_frame_calibration_beats_single_noisy_frame(self) -> None:
+        from astro_nav.zenith_fix import apply_tilt_offset, calibrate_tilt_offset, great_circle_km
+        rng = np.random.default_rng(11)
+        w = np.radians([0.4, 0.5, -0.2]); k = np.array([[0, -w[2], w[1]], [w[2], 0, -w[0]], [-w[1], w[0], 0]])
+        bias = np.eye(3) + k + k @ k / 2
+        u, _, vt = np.linalg.svd(bias); bias = u @ vt
+        t0 = datetime(2026, 3, 3, 22, 0, tzinfo=timezone.utc)
+        obs = []
+        for i in range(12):                              # 12 gurultulu kalibrasyon karesi (0.3 deg)
+            r, _, m = self._biased(41.0, 29.0, t0 + timedelta(minutes=5 * i), rng.uniform(0, 360),
+                                   rng.uniform(25, 75), rng.uniform(-30, 30), bias, rng, 0.3)
+            obs.append((r, m, t0 + timedelta(minutes=5 * i), 41.0, 29.0))
+        cal12 = calibrate_tilt_offset(obs)
+        cal1 = calibrate_tilt_offset(obs[:1])
+        e1, e12 = [], []
+        for _ in range(40):                              # baska konum, gurultusuz test
+            lat, lon = math.degrees(math.asin(rng.uniform(-0.9, 0.9))), rng.uniform(-180, 180)
+            when = t0 + timedelta(days=float(rng.uniform(1, 300)), hours=float(rng.uniform(0, 8)))
+            r, _, m = self._biased(lat, lon, when, rng.uniform(0, 360), rng.uniform(25, 75),
+                                   rng.uniform(-30, 30), bias, rng, 0.0)
+            for cal, store in ((cal1, e1), (cal12, e12)):
+                f = solve_position(r, apply_tilt_offset(cal["Q"], m), when)
+                store.append(great_circle_km(lat, lon, f.latitude_deg, f.longitude_deg))
+        self.assertLess(np.median(e12), np.median(e1))   # cok kare > tek gurultulu kare
+        # Beklenen: 0.3 deg gurultu / sqrt(12) ~ 0.12 deg ~ 15-20 km
+        self.assertLess(np.median(e12), 30.0)

@@ -266,3 +266,59 @@ def choose_roll_sign(ra_deg: float, dec_deg: float, roll_deg: float, up_cam: Seq
     best = min(out, key=out.get)
     return {"best_roll_sign": best, "error_km": out[best], "other_error_km": out[-best],
             "decisive": out[-best] > 5 * max(out[best], 1.0)}
+
+
+# ---------------------------------------------------------------- sensor sapmasi kalibrasyonu
+
+def true_up_cam(cel_from_cam: np.ndarray, when_utc: datetime, lat_deg: float, lon_deg: float) -> np.ndarray:
+    """Bilinen konum icin zenit yonu (kamera ekseninde) - sensorun OLMASI gereken degeri."""
+    jd = julian_date_utc(when_utc)
+    p, l = math.radians(lat_deg), math.radians(lon_deg) + greenwich_apparent_sidereal_time(jd)
+    zen_date = np.array([math.cos(p) * math.cos(l), math.cos(p) * math.sin(l), math.sin(p)])
+    zen_icrs = precession_nutation_matrix(jd).T @ zen_date
+    return np.asarray(cel_from_cam, dtype=float).T @ zen_icrs
+
+
+def _minimal_rotation(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """a'yi b'ye ceviren en kucuk dondurme (Rodrigues)."""
+    a, b = _unit(a), _unit(b)
+    v = np.cross(a, b)
+    c = float(np.dot(a, b))
+    if c < -1 + 1e-12:
+        raise ValueError("Sensor 180 derece ters: isaret/eksen hatasi")
+    k = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    return np.eye(3) + k + k @ k / (1.0 + c)
+
+
+def calibrate_tilt_offset(observations: Sequence[tuple]) -> dict:
+    """Sensor-kamera hiza sapmasini (sabit dondurme Q) bilinen konumlu karelerden hesapla.
+
+    observations: (cel_from_cam, olculen_up_cam, when_utc, gercek_lat, gercek_lon) listesi.
+    Duzeltme: up_duzeltilmis = Q @ up_olculen. Tek kare yeterlidir (en kucuk dondurme);
+    birden cok kare varsa Kabsch/SVD ile en iyi dondurme bulunur ve artik hata raporlanir.
+    Sensor kameraya gore sabitse (telefon) Q her karede ve her konumda gecerlidir.
+
+    ONEMLI: Tek kare, sapmanin zenit ekseni etrafindaki bilesenini goremez. Kalibrasyon
+    karelerini FARKLI egim ve roll degerlerinde cekin. Olculen davranis (0.3 deg sensor
+    gurultusu): 1 kare ~30 km, 12 kare ~15 km, 50 kare ~10 km artik hata.
+    """
+    meas, true = [], []
+    for r, up, when, lat, lon in observations:
+        meas.append(_unit(up))
+        true.append(_unit(true_up_cam(r, when, lat, lon)))
+    if not meas:
+        raise ValueError("En az bir kalibrasyon karesi gerekli")
+    if len(meas) == 1:
+        q = _minimal_rotation(meas[0], true[0])
+    else:
+        h = sum(np.outer(m, t) for m, t in zip(meas, true))
+        u, _, vt = np.linalg.svd(h)
+        d = np.sign(np.linalg.det(vt.T @ u.T))
+        q = vt.T @ np.diag([1.0, 1.0, d]) @ u.T
+    residuals = [math.degrees(math.acos(max(-1.0, min(1.0, float(np.dot(q @ m, t)))))) for m, t in zip(meas, true)]
+    return {"Q": q, "offset_deg": math.degrees(math.acos(max(-1.0, min(1.0, (np.trace(q) - 1) / 2)))),
+            "residual_deg": float(max(residuals)), "frames": len(meas)}
+
+
+def apply_tilt_offset(q: np.ndarray, up_cam: Sequence[float]) -> np.ndarray:
+    return _unit(np.asarray(q, dtype=float) @ _unit(up_cam))

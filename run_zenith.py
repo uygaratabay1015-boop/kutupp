@@ -16,10 +16,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 
+import numpy as np
+
 from astro_nav.zenith_fix import (
+    apply_tilt_offset,
+    calibrate_tilt_offset,
     choose_roll_sign,
     monte_carlo_error,
     quality_warnings,
@@ -59,6 +64,9 @@ def main() -> None:
                       help="Sensor asagi yonu veriyorsa (varsayilan: yukari)")
     p.add_argument("--known-lat", type=float, help="Calibrasyon: gercek enlem")
     p.add_argument("--known-lon", type=float, help="Calibrasyon: gercek boylam")
+    p.add_argument("--save-tilt-cal", help="Bilinen konumlu kareden sensor sapmasini hesapla ve bu JSON dosyasina kaydet "
+                                           "(--known-lat/--known-lon gerekir; farkli egim/roll'larla cok kare icin dosyaya ekler)")
+    p.add_argument("--tilt-cal", help="Kaydedilmis sensor sapmasi kalibrasyonunu uygula")
     p.add_argument("--tilt-sigma", type=float, default=0.5, help="Egim sensoru hatasi (derece, 1 sigma)")
     p.add_argument("--time-sigma", type=float, default=1.0, help="Saat hatasi (sn, 1 sigma)")
     args = p.parse_args()
@@ -100,6 +108,38 @@ def main() -> None:
             warnings.append("Roll isareti net ayirt edilemedi; baska bir fotografla tekrar deneyin.")
 
     cel_from_cam = rotation_from_radec_roll(ra, dec, roll, sign)
+
+    tilt_cal_info = None
+    if args.save_tilt_cal:
+        if args.known_lat is None or args.known_lon is None:
+            raise SystemExit("--save-tilt-cal icin --known-lat ve --known-lon gerekli")
+        store = {"frames": []}
+        if os.path.exists(args.save_tilt_cal):
+            with open(args.save_tilt_cal, encoding="utf-8") as fh:
+                store = json.load(fh)
+        store["frames"].append({
+            "cel_from_cam": cel_from_cam.tolist(), "up_measured": [float(v) for v in up],
+            "utc": when.isoformat(), "lat": args.known_lat, "lon": args.known_lon})
+        obs = [(np.array(f["cel_from_cam"]), np.array(f["up_measured"]), parse_utc(f["utc"]), f["lat"], f["lon"])
+               for f in store["frames"]]
+        cal = calibrate_tilt_offset(obs)
+        store["Q"] = cal["Q"].tolist()
+        with open(args.save_tilt_cal, "w", encoding="utf-8") as fh:
+            json.dump(store, fh)
+        tilt_cal_info = {"saved": args.save_tilt_cal, "frames": cal["frames"],
+                         "offset_deg": round(cal["offset_deg"], 3), "residual_deg": round(cal["residual_deg"], 3)}
+        if cal["frames"] < 8:
+            warnings.append(f"Kalibrasyon {cal['frames']} kareyle yapildi; farkli egim/roll'larla en az ~10 kare onerilir "
+                            "(1 kare ~30 km, 12 kare ~15 km artik hata).")
+        up = apply_tilt_offset(cal["Q"], up)
+    elif args.tilt_cal:
+        with open(args.tilt_cal, encoding="utf-8") as fh:
+            store = json.load(fh)
+        up = apply_tilt_offset(np.array(store["Q"]), up)
+        tilt_cal_info = {"applied": args.tilt_cal, "frames": len(store.get("frames", []))}
+    else:
+        warnings.append("Sensor sapmasi kalibre edilmedi: tipik telefonda ~50-100 km ek hata olabilir (--save-tilt-cal).")
+
     fix = solve_position(cel_from_cam, up, when)
     err = monte_carlo_error(cel_from_cam, up, when, sigma_tilt_deg=args.tilt_sigma,
                             sigma_time_s=args.time_sigma, n=800)
@@ -115,6 +155,7 @@ def main() -> None:
         "solve": solve_info,
         "roll_sign": sign,
         "calibration": calibration,
+        "tilt_calibration": tilt_cal_info,
         "warnings": warnings,
     }, indent=2, ensure_ascii=False))
 
