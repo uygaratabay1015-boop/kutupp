@@ -124,6 +124,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
     private var selectedTiltLabel: String? = null
+    private var selectedTiltSpreadDeg: Float? = null
+    private var selectedCaptureEpochMs: Long? = null
+    @Volatile private var zenithLocator: ZenithLocator? = null
     private lateinit var starDetector: StarDetector
     private lateinit var polarisFinder: PolarisFinder
     private lateinit var southernCrossFinder: SouthernCrossFinder
@@ -332,6 +335,15 @@ class MainActivity : AppCompatActivity() {
         compass = CompassSensor(this)
         tiltSensor = TiltSensor(this)
         starDetector = StarDetector()
+        // Yildiz katalogu + plaka cozucu: tamamen cihaz ici (assets), arka planda hazirlanir.
+        Thread {
+            try {
+                val catalog = assets.open("star_catalog_j2000.bin").use { StarCatalog.load(it) }
+                zenithLocator = ZenithLocator(StarPlateSolver(catalog))
+            } catch (e: Exception) {
+                Log.e(TAG, "Yildiz katalogu yuklenemedi", e)
+            }
+        }.apply { name = "star-catalog-loader"; isDaemon = true; start() }
         polarisFinder = PolarisFinder()
         southernCrossFinder = SouthernCrossFinder()
         latitudeSolver = LatitudeSolver()
@@ -465,6 +477,8 @@ class MainActivity : AppCompatActivity() {
                     }
                     val capturePitch = if (useTilt) tilt!!.pitchDeg else compass.getPitchDegrees()
                     val captureRoll = if (useTilt) tilt!!.rollDeg else compass.getRollDegrees()
+                    val captureEpochMs = System.currentTimeMillis()
+                    val tiltSpread = if (useTilt) tilt!!.spreadDeg else null
                     val tiltLabel = if (useTilt) {
                         "Pitch/Roll: Sensor füzyonu (±%.2f°%s)".format(tilt!!.spreadDeg, if (tilt.usedGyro) ", jiroskop" else "")
                     } else null
@@ -480,7 +494,9 @@ class MainActivity : AppCompatActivity() {
                                     captureRollDeg = captureRoll,
                                     captureAzimuthDeg = compass.getAzimuth(),
                                     captureDateTime = nowMinutePrecision(),
-                                    tiltLabel = tiltLabel
+                                    tiltLabel = tiltLabel,
+                                    tiltSpreadDeg = tiltSpread,
+                                    captureEpochMs = captureEpochMs
                                 )
                                 setProcessingState(false)
                                 Toast.makeText(this@MainActivity, "Foto cekildi. HESAPLA'ya bas.", Toast.LENGTH_SHORT).show()
@@ -513,7 +529,9 @@ class MainActivity : AppCompatActivity() {
         captureRollDeg: Float? = null,
         captureAzimuthDeg: Float? = null,
         captureDateTime: LocalDateTime? = null,
-        tiltLabel: String? = null
+        tiltLabel: String? = null,
+        tiltSpreadDeg: Float? = null,
+        captureEpochMs: Long? = null
     ) {
         selectedBitmap?.recycle()
         selectedBitmap = bitmap
@@ -522,6 +540,8 @@ class MainActivity : AppCompatActivity() {
         selectedCameraRollDeg = captureRollDeg ?: compass.getRollDegrees()
         selectedCameraAzimuthDeg = captureAzimuthDeg ?: compass.getAzimuth()
         selectedTiltLabel = if (source == CaptureSource.CAMERA) tiltLabel else null
+        selectedTiltSpreadDeg = if (source == CaptureSource.CAMERA) tiltSpreadDeg else null
+        selectedCaptureEpochMs = if (source == CaptureSource.CAMERA) captureEpochMs else null
         selectedCaptureDateTime = captureDateTime ?: nowMinutePrecision()
         if (source == CaptureSource.CAMERA) {
             selectedExifDateTime = null
@@ -552,6 +572,9 @@ class MainActivity : AppCompatActivity() {
         setProcessingState(true)
         val useOfflinePlate = offlinePlateSwitch.isChecked
         cameraExecutor.execute {
+            // 1) Zenit yontemi (cihaz ici yildiz cozumu + egim + saat). Olmazsa eski yonteme dus.
+            val zenith = tryZenithLocate(bitmap, source, observationDateTime, calibration)
+            if (zenith.first) return@execute
             processBitmap(
                 bitmap = bitmap,
                 source = source,
@@ -559,9 +582,66 @@ class MainActivity : AppCompatActivity() {
                 pitchForSolve = calibration.pitchDeg,
                 rollForSolve = calibration.rollDeg,
                 azimuthForSolve = calibration.azimuthDeg,
-                calibrationNote = calibration.note,
+                calibrationNote = calibration.note + " | Zenit: " + zenith.second,
                 useOfflinePlate = useOfflinePlate
             )
+        }
+    }
+
+    /** @return (basarili, aciklama). Basariliysa sonuc ekrana yazilmis ve isleme durumu kapatilmistir. */
+    private fun tryZenithLocate(
+        bitmap: Bitmap,
+        source: CaptureSource,
+        observationDateTime: LocalDateTime,
+        calibration: OrientationCalibration
+    ): Pair<Boolean, String> {
+        val locator = zenithLocator ?: return Pair(false, "katalog hazir degil")
+        if (calibration.note.contains("varsayim", ignoreCase = true)) {
+            return Pair(false, "egim verisi yok (Pitch/Roll elle girin)")
+        }
+        return try {
+            val stars = starDetector.detectStars(bitmap)
+            val useExactTime = source == CaptureSource.CAMERA && dateModeToday.isChecked && selectedCaptureEpochMs != null
+            val epochMs = if (useExactTime) selectedCaptureEpochMs!! else
+                observationDateTime.atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+            val timeSigma = if (useExactTime) 2.0 else 30.0
+            val tiltSigma = when {
+                calibration.note.contains("füzyonu") -> Math.hypot((selectedTiltSpreadDeg ?: 0.5f).toDouble(), 0.3)
+                calibration.note.contains("Manuel") -> 1.0
+                calibration.note.contains("Ufuk") -> 1.5
+                else -> 2.0
+            }
+            val out = locator.locate(
+                stars = stars, widthPx = bitmap.width, heightPx = bitmap.height,
+                longSideFovDeg = horizontalFov.toDouble(),
+                pitchDeg = calibration.pitchDeg.toDouble(), rollDeg = calibration.rollDeg.toDouble(),
+                epochMillis = epochMs, tiltSigmaDeg = tiltSigma, timeSigmaSec = timeSigma
+            )
+            if (!out.ok) return Pair(false, out.message)
+            val plate = out.plate!!
+            runOnUiThread {
+                resultTextView.text = String.format(
+                    Locale.US,
+                    "Konum: %.4f°%s %.4f°%s | tahmini hata ~%.0f km (%%68), ~%.0f km (%%95)",
+                    abs(out.latitudeDeg), if (out.latitudeDeg >= 0) "K" else "G",
+                    abs(out.longitudeDeg), if (out.longitudeDeg >= 0) "D" else "B",
+                    out.errorKm68, out.errorKm95
+                )
+                infoTextView.text = String.format(
+                    Locale.US,
+                    "Zenit yontemi | Esleşen yildiz %d/%d (rms %.3f°) | Gorus acisi %.1f° | Kamera yuksekligi %.0f° | %s | Egim hatasi ±%.2f° | Saat hatasi ±%.0f sn",
+                    plate.matchedStars, plate.usedStars, plate.rmsDeg, plate.longSideFovDeg, out.boresightAltitudeDeg,
+                    calibration.note, tiltSigma, timeSigma
+                )
+                lastEstimatedLatitude = out.latitudeDeg
+                lastEstimatedLongitude = out.longitudeDeg
+                showMapButton.isEnabled = true
+                setProcessingState(false)
+            }
+            Pair(true, "ok")
+        } catch (e: Exception) {
+            Log.e(TAG, "Zenit hesabi hatasi", e)
+            Pair(false, "hata: ${e.message}")
         }
     }
 

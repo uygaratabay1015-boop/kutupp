@@ -242,3 +242,17 @@ Sorun yaşarsanız:
 ## Method and Sources (Jury)
 - See `METHOD_AND_SOURCES_TR.md` for explainable methodology and references.
 
+
+## Dunya capinda konum (zenit yontemi, tamamen cihaz ici)
+
+HESAPLA'ya basinca uygulama once zenit yontemini dener (internet gerekmez):
+
+1. Yildizlar tespit edilir; `StarPlateSolver` bunlari `assets/star_catalog_j2000.bin` (Hipparcos, <=5.5 kadir) ile eslestirir
+   ve kameranin gokyuzundeki yonelimini (kamera->ICRS matrisi) bulur.
+2. `TiltSensor/TiltEstimator` ivmeolcer+jiroskoptan zenit yonunu (yercekimi) kamera ekseninde verir.
+3. `ZenithFix` zenit yonunu ve saati (UTC, saniye hassasiyeti) kullanarak enlem+boylami hesaplar.
+   Olmazsa (yildiz yok/eslesmedi/egim verisi yok) eski kutup yildizi yontemine dusulur.
+
+Hata butcesi: 1° egim hatasi ~111 km; saat 1 sn ~0.35 km; plaka cozumu ~0.5 km. Bu yuzden telefonu sabit tutun (aci rehberi).
+Katalog uretimi: `python3 tools/build_star_catalog.py <stars.6.json> 5.5` (kaynak lisansi: NOTICE_STAR_CATALOG.txt).
+Lens distorsiyonu modellenmez; FOV kamera metadatasindan alinir (+-%7 tolere edilir).
