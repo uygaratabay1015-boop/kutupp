@@ -417,6 +417,7 @@ class MainActivity : AppCompatActivity() {
             if (sensorWidthMm != null && focalMm != null && sensorWidthMm > 0f && focalMm > 0f) {
                 val hFovRad = 2.0 * atan((sensorWidthMm / (2.0 * focalMm)).toDouble())
                 horizontalFov = Math.toDegrees(hFovRad).toFloat().coerceIn(35f, 120f)
+                aimGuide.setFov(horizontalFov)
             }
         } catch (e: Exception) {
             Log.w(TAG, "Kamera FOV metadata okunamadi, varsayilan 60 derece kullaniliyor", e)
@@ -429,7 +430,7 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle("Nasil cekilir?")
             .setMessage(
-                "1) Telefonu acik gokyuzune cevirin; ekrandaki yesil aralikta (40°-70°) tutun.\n" +
+                "1) Telefonu acik gokyuzune cevirin; ekrandaki yesil aralikta tutun (genelde yaklasik 55°-75°, kameraya gore otomatik ayarlanir).\n" +
                 "2) Beyaz cizgiler ile hareketli cizgiyi ust uste getirin (telefon yana yatik olmasin).\n" +
                 "3) Mumkunse tripod kullanin veya telefonu bir yere dayayin; elde tutarken kolunuzu govdenize yaslayin.\n" +
                 "4) Halka dolup 'Hazir!' yazinca cekin; cekim sirasinda telefona dokunup sarsmayin.\n" +

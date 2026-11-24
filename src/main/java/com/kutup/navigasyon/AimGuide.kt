@@ -18,19 +18,36 @@ data class AimState(
 /**
  * "Telefonu su aciyla tut" rehberi (iPhone kamera su terazisi mantigi). Saf mantik, Android'siz.
  *
- * Hedef: kamera ufkun [minPitchDeg]..[maxPitchDeg] derece ustunde (hem yildiz cok, hem roll iyi tanimli;
- * 90'a yakin roll belirsizlesir), roll ~0, ve [holdMs] boyunca titremesiz.
+ * Hedef aralik gorus acisina gore secilir: karenin en alt kenari ufuktan en az [EDGE_MARGIN_DEG]
+ * derece yukarida kalmali (ufka yakin yildizlarda atmosfer kirilmasi/sis plaka cozumunu bozar).
+ * Ustte 80 dereceyi gecmeyiz: dike yakinken roll tanimsizlasir ve elde tutmak zorlasir.
+ * Egim sensoru hatasi pitch'ten bagimsiz (1° ~ 111 km), bu yuzden pitch secimi ikincil;
+ * asil olan titremesizlik ([steadySpreadDeg]).
  */
 class AimGuide(
-    val minPitchDeg: Float = 40f,
-    val maxPitchDeg: Float = 70f,
+    minPitchDeg: Float = 55f,
+    maxPitchDeg: Float = 75f,
     val rollTolDeg: Float = 3f,
-    val steadySpreadDeg: Float = 0.3f,
+    val steadySpreadDeg: Float = 0.2f,
     val holdMs: Long = 2000L
 ) {
+    var minPitchDeg: Float = minPitchDeg
+        private set
+    var maxPitchDeg: Float = maxPitchDeg
+        private set
+
+    /** Uzun kenar gorus acisina (derece) gore hedef araligi ayarlar. */
+    fun setFov(longSideFovDeg: Float) {
+        val lo = (longSideFovDeg / 2f + EDGE_MARGIN_DEG).coerceIn(50f, 70f)
+        minPitchDeg = lo
+        maxPitchDeg = (lo + 20f).coerceAtMost(80f)
+    }
+
     private var okSinceMs: Long = -1L
 
     fun reset() { okSinceMs = -1L }
+
+    companion object { const val EDGE_MARGIN_DEG = 22f }
 
     fun evaluate(tilt: CameraTilt?, nowMs: Long): AimState {
         if (tilt == null) {
