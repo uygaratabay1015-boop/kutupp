@@ -78,6 +78,8 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "KutupNav"
+        private const val MIN_TILT_QUALITY = 0.15f
+        private const val SHAKY_TILT_SPREAD_DEG = 1.0f
         private const val REQUEST_CODE_PERMISSIONS = 10
         private val REQUIRED_PERMISSIONS = arrayOf(Manifest.permission.CAMERA)
     }
@@ -105,6 +107,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var offlinePlateSwitch: SwitchCompat
 
     private lateinit var compass: CompassSensor
+    private lateinit var tiltSensor: TiltSensor
+    private var selectedTiltLabel: String? = null
     private lateinit var starDetector: StarDetector
     private lateinit var polarisFinder: PolarisFinder
     private lateinit var southernCrossFinder: SouthernCrossFinder
@@ -192,6 +196,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         compass.startListening()
+        tiltSensor.startListening()
         updateModeText()
     }
 
@@ -200,10 +205,12 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         if (::compass.isInitialized) compass.startListening()
+        if (::tiltSensor.isInitialized) tiltSensor.startListening()
     }
 
     override fun onPause() {
         if (::compass.isInitialized) compass.stopListening()
+        if (::tiltSensor.isInitialized) tiltSensor.stopListening()
         super.onPause()
     }
 
@@ -212,6 +219,7 @@ class MainActivity : AppCompatActivity() {
         selectedBitmap?.recycle()
         latestAnnotatedBitmap?.recycle()
         compass.stopListening()
+        if (::tiltSensor.isInitialized) tiltSensor.stopListening()
         cameraExecutor.shutdown()
     }
 
@@ -297,6 +305,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun initializeModules() {
         compass = CompassSensor(this)
+        tiltSensor = TiltSensor(this)
         starDetector = StarDetector()
         polarisFinder = PolarisFinder()
         southernCrossFinder = SouthernCrossFinder()
@@ -405,6 +414,17 @@ class MainActivity : AppCompatActivity() {
             ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageCapturedCallback() {
                 override fun onCaptureSuccess(image: ImageProxy) {
+                    // Sensor penceresi cekim anina ait: once (ana is parcacigi) hesaplanir.
+                    val tilt = tiltSensor.estimateForCapture(localImageCapture.targetRotation)
+                    val useTilt = tilt != null && tilt.quality >= MIN_TILT_QUALITY
+                    if (tilt != null && tilt.spreadDeg > SHAKY_TILT_SPREAD_DEG) {
+                        Toast.makeText(this@MainActivity, "Telefon titredi (±%.1f°). Sabit tutup tekrar cekin.".format(tilt.spreadDeg), Toast.LENGTH_LONG).show()
+                    }
+                    val capturePitch = if (useTilt) tilt!!.pitchDeg else compass.getPitchDegrees()
+                    val captureRoll = if (useTilt) tilt!!.rollDeg else compass.getRollDegrees()
+                    val tiltLabel = if (useTilt) {
+                        "Pitch/Roll: Sensor füzyonu (±%.2f°%s)".format(tilt!!.spreadDeg, if (tilt.usedGyro) ", jiroskop" else "")
+                    } else null
                     cameraExecutor.execute {
                         try {
                             val rawBitmap = imageToBitmap(image)
@@ -413,10 +433,11 @@ class MainActivity : AppCompatActivity() {
                                 setSelectedPhoto(
                                     bitmap = bitmap,
                                     source = CaptureSource.CAMERA,
-                                    capturePitchDeg = compass.getPitchDegrees(),
-                                    captureRollDeg = compass.getRollDegrees(),
+                                    capturePitchDeg = capturePitch,
+                                    captureRollDeg = captureRoll,
                                     captureAzimuthDeg = compass.getAzimuth(),
-                                    captureDateTime = nowMinutePrecision()
+                                    captureDateTime = nowMinutePrecision(),
+                                    tiltLabel = tiltLabel
                                 )
                                 setProcessingState(false)
                                 Toast.makeText(this@MainActivity, "Foto cekildi. HESAPLA'ya bas.", Toast.LENGTH_SHORT).show()
@@ -448,7 +469,8 @@ class MainActivity : AppCompatActivity() {
         capturePitchDeg: Float? = null,
         captureRollDeg: Float? = null,
         captureAzimuthDeg: Float? = null,
-        captureDateTime: LocalDateTime? = null
+        captureDateTime: LocalDateTime? = null,
+        tiltLabel: String? = null
     ) {
         selectedBitmap?.recycle()
         selectedBitmap = bitmap
@@ -456,6 +478,7 @@ class MainActivity : AppCompatActivity() {
         selectedCameraPitchDeg = capturePitchDeg ?: compass.getPitchDegrees()
         selectedCameraRollDeg = captureRollDeg ?: compass.getRollDegrees()
         selectedCameraAzimuthDeg = captureAzimuthDeg ?: compass.getAzimuth()
+        selectedTiltLabel = if (source == CaptureSource.CAMERA) tiltLabel else null
         selectedCaptureDateTime = captureDateTime ?: nowMinutePrecision()
         if (source == CaptureSource.CAMERA) {
             selectedExifDateTime = null
@@ -900,7 +923,7 @@ class MainActivity : AppCompatActivity() {
             horizonPitch != null && manualRoll != null -> "Pitch: Ufuk, Roll: Manuel"
             horizonPitch != null && horizonPercentRaw == null -> "Pitch: Ufuk (otomatik)"
             horizonPitch != null -> "Pitch: Ufuk"
-            source == CaptureSource.CAMERA -> "Pitch/Roll: Sensor"
+            source == CaptureSource.CAMERA -> selectedTiltLabel ?: "Pitch/Roll: Sensor"
             else -> "Pitch/Roll: Otomatik varsayim (0/0)"
         }
         return OrientationCalibration(
