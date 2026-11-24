@@ -13,6 +13,8 @@ import android.graphics.Paint
 import android.hardware.camera2.CameraCharacteristics
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.util.Size
 import android.view.View
@@ -25,6 +27,7 @@ import android.widget.RadioButton
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.camera.camera2.interop.Camera2CameraInfo
@@ -108,6 +111,18 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var compass: CompassSensor
     private lateinit var tiltSensor: TiltSensor
+    private lateinit var aimGuideView: AimGuideView
+    private val aimGuide = AimGuide()
+    private val aimHandler = Handler(Looper.getMainLooper())
+    private val aimTick = object : Runnable {
+        override fun run() {
+            if (::tiltSensor.isInitialized && ::aimGuideView.isInitialized) {
+                val tilt = tiltSensor.estimateForCapture(previewView.display?.rotation ?: android.view.Surface.ROTATION_0, 0.7)
+                aimGuideView.update(aimGuide.evaluate(tilt, android.os.SystemClock.elapsedRealtime()))
+            }
+            aimHandler.postDelayed(this, 100L)
+        }
+    }
     private var selectedTiltLabel: String? = null
     private lateinit var starDetector: StarDetector
     private lateinit var polarisFinder: PolarisFinder
@@ -206,9 +221,12 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         if (::compass.isInitialized) compass.startListening()
         if (::tiltSensor.isInitialized) tiltSensor.startListening()
+        aimGuide.reset()
+        aimHandler.post(aimTick)
     }
 
     override fun onPause() {
+        aimHandler.removeCallbacks(aimTick)
         if (::compass.isInitialized) compass.stopListening()
         if (::tiltSensor.isInitialized) tiltSensor.stopListening()
         super.onPause()
@@ -225,6 +243,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun initializeUI() {
         previewView = findViewById(R.id.previewView)
+        aimGuideView = findViewById(R.id.aimGuideView)
+        aimGuideView.setGuide(aimGuide)
+        showHowToShootOnce()
         controlPanel = findViewById(R.id.controlPanel)
         togglePanelButton = findViewById(R.id.togglePanelButton)
         captureButton = findViewById(R.id.captureButton)
@@ -400,6 +421,23 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             Log.w(TAG, "Kamera FOV metadata okunamadi, varsayilan 60 derece kullaniliyor", e)
         }
+    }
+
+    private fun showHowToShootOnce() {
+        val prefs = getSharedPreferences("kutup_prefs", MODE_PRIVATE)
+        if (prefs.getBoolean("howto_seen", false)) return
+        AlertDialog.Builder(this)
+            .setTitle("Nasil cekilir?")
+            .setMessage(
+                "1) Telefonu acik gokyuzune cevirin; ekrandaki yesil aralikta (40°-70°) tutun.\n" +
+                "2) Beyaz cizgiler ile hareketli cizgiyi ust uste getirin (telefon yana yatik olmasin).\n" +
+                "3) Mumkunse tripod kullanin veya telefonu bir yere dayayin; elde tutarken kolunuzu govdenize yaslayin.\n" +
+                "4) Halka dolup 'Hazir!' yazinca cekin; cekim sirasinda telefona dokunup sarsmayin.\n" +
+                "5) Saatin ve saat diliminin dogru oldugundan emin olun.\n\n" +
+                "Not: 1° egim hatasi yaklasik 111 km konum hatasi demektir; sabit tutmak cok onemli."
+            )
+            .setPositiveButton("Anladim") { _, _ -> prefs.edit().putBoolean("howto_seen", true).apply() }
+            .show()
     }
 
     private fun takePhotoForSelection() {
