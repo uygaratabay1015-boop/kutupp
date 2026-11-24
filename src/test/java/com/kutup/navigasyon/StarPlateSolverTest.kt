@@ -143,4 +143,55 @@ class StarPlateSolverTest {
         assertTrue("e68=$e68", e68 in 40.0..70.0)
         assertTrue(e95 > e68)
     }
+
+    /** Dunya capinda gece: rastgele enlem/boylam/saat/yon -> gercek konumdan kamera yonelimi -> yildizlar -> konum. */
+    @Test fun worldwideNightSweep() {
+        val rng = Random(1234)
+        val locator = ZenithLocator(solver)
+        fun cross(a: DoubleArray, b: DoubleArray) = doubleArrayOf(a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0])
+        fun unit(a: DoubleArray): DoubleArray { val n = sqrt(a.sumOf { it * it }); return DoubleArray(3) { a[it] / n } }
+        data class Scenario(val name: String, val tiltSigma: Double)
+        for (sc in listOf(Scenario("tripod 0.05°", 0.05), Scenario("dikkatli el 0.15°", 0.15), Scenario("normal el 0.4°", 0.4))) {
+            val errs = ArrayList<Double>(); var failed = 0; var total = 0
+            for (trial in 0 until 150) {
+                val lat = Math.toDegrees(asin(rng.nextDouble() * 2 - 1))
+                val lon = rng.nextDouble() * 360 - 180
+                val day0 = 1_795_000_000_000L + (rng.nextDouble() * 365 * 86400e3).toLong()
+                val localHour = 21.0 + rng.nextDouble() * 6.0
+                val epoch = day0 - day0 % 86_400_000L + ((localHour - lon / 15.0) * 3_600_000.0).toLong()
+                val pitch = 55.0 + rng.nextDouble() * 20; val roll = (rng.nextDouble() - 0.5) * 6
+                val az = rng.nextDouble() * 2 * PI
+                val jd = ZenithFix.julianDateUtc(epoch)
+                val lst = Math.toRadians(lon) + ZenithFix.greenwichApparentSiderealTime(jd)
+                val la = Math.toRadians(lat)
+                val east = doubleArrayOf(-sin(lst), cos(lst), 0.0)
+                val north = doubleArrayOf(-sin(la) * cos(lst), -sin(la) * sin(lst), cos(la))
+                val upW = doubleArrayOf(cos(la) * cos(lst), cos(la) * sin(lst), sin(la))
+                val p = Math.toRadians(pitch); val rr = Math.toRadians(roll)
+                val b = DoubleArray(3) { cos(p) * (sin(az) * east[it] + cos(az) * north[it]) + sin(p) * upW[it] }
+                val w = unit(DoubleArray(3) { (upW[it] - sin(p) * b[it]) / cos(p) })
+                val q = cross(b, w)
+                val x = DoubleArray(3) { -sin(rr) * w[it] + cos(rr) * q[it] }
+                val y = DoubleArray(3) { -cos(rr) * w[it] - sin(rr) * q[it] }
+                val pn = ZenithFix.precessionNutationMatrix(jd) // td = P * icrs  -> icrs = P^T td
+                fun toIcrs(v: DoubleArray) = DoubleArray(3) { i -> pn[0][i] * v[0] + pn[1][i] * v[1] + pn[2][i] * v[2] }
+                val xi = toIcrs(x); val yi = toIcrs(y); val zi = toIcrs(b)
+                val r = Array(3) { i -> doubleArrayOf(xi[i], yi[i], zi[i]) }
+                val fov = 60.0 + rng.nextDouble() * 15
+                val stars = synth(rng, r, fov, 4000, 3000, 4.6f, 0.7, 0.25, 8)
+                // sensor egim hatasi: rastgele 2B
+                val ang = rng.nextDouble() * 2 * PI; val mag = abs(rng.nextGaussian()) * sc.tiltSigma
+                val dp = pitch + mag * cos(ang)
+                val dr = roll + mag * sin(ang)
+                total++
+                val out = locator.locate(stars, 4000, 3000, fov * (1 + (rng.nextDouble() - .5) * .08), dp, dr,
+                    epoch + (rng.nextGaussian() * 1000).toLong(), sc.tiltSigma, 1.0, maxSolveMillis = 5000)
+                if (!out.ok) { failed++; continue }
+                errs.add(ZenithFix.greatCircleKm(lat, lon, out.latitudeDeg, out.longitudeDeg))
+            }
+            errs.sort()
+            fun pc(q: Double) = errs[min(errs.size - 1, (q * errs.size).toInt())]
+            println("DUNYA ${sc.name}: ${total - failed}/$total cozuldu | medyan %.1f km, %%68 %.1f km, %%95 %.1f km, maks %.1f km".format(pc(.5), pc(.68), pc(.95), errs.last()))
+        }
+    }
 }
