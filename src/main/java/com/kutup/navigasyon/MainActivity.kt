@@ -181,7 +181,11 @@ class MainActivity : AppCompatActivity() {
                         captureDateTime = selectedExifDateTime ?: nowMinutePrecision()
                     )
                     setProcessingState(false)
-                    Toast.makeText(this, "Foto secildi. HESAPLA'ya bas.", Toast.LENGTH_SHORT).show()
+                    val hasExifTime = selectedExifDateTime != null
+                    val msg = "Galeri fotosu: telefon egim sensoru verisi yok, bu yuzden dogruluk dusuk olur. " +
+                        "Pitch/Roll degerlerini elle girin" + (if (hasExifTime) "." else " ve cekim saatini kontrol edin (EXIF'te yok).") +
+                        " En iyi sonuc icin uygulamanin kamerasiyla cekin."
+                    Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Galeri isleme hatasi", e)
