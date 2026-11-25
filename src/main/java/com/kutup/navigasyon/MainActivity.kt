@@ -125,7 +125,7 @@ class MainActivity : AppCompatActivity() {
                 if (aimState.ready && autoShutterSwitch.isChecked && !isProcessing && imageCapture != null && nowMs - lastAutoShotMs > 6000L) {
                     lastAutoShotMs = nowMs
                     aimGuide.reset()
-                    takePhotoForSelection()
+                    startCaptureSequence()
                 }
             }
             aimHandler.postDelayed(this, 100L)
@@ -138,6 +138,7 @@ class MainActivity : AppCompatActivity() {
     private var tiltCalibration = TiltCalibration()
     private lateinit var calibrateButton: Button
     private lateinit var autoShutterSwitch: SwitchCompat
+    private lateinit var burstSwitch: SwitchCompat
     private var lastAutoShotMs = 0L
     private var selectedCaptureEpochMs: Long? = null
     @Volatile private var zenithLocator: ZenithLocator? = null
@@ -267,6 +268,7 @@ class MainActivity : AppCompatActivity() {
         aimGuideView = findViewById(R.id.aimGuideView)
         calibrateButton = findViewById(R.id.calibrateButton)
         autoShutterSwitch = findViewById(R.id.autoShutterSwitch)
+        burstSwitch = findViewById(R.id.burstSwitch)
         calibrateButton.setOnClickListener { onCalibratePressed() }
         calibrateButton.setOnLongClickListener {
             tiltCalibration.clear(); saveTiltCalibration()
@@ -323,7 +325,7 @@ class MainActivity : AppCompatActivity() {
         calculateButton.isEnabled = false
         showMapButton.isEnabled = false
 
-        captureButton.setOnClickListener { takePhotoForSelection() }
+        captureButton.setOnClickListener { startCaptureSequence() }
         galleryButton.setOnClickListener {
             setProcessingState(true)
             pickImageLauncher.launch("image/*")
@@ -597,14 +599,18 @@ class MainActivity : AppCompatActivity() {
                                     displayRotationDeg = captureRotationDeg,
                                     upMeasured = upMeasured
                                 )
-                                setProcessingState(false)
-                                Toast.makeText(this@MainActivity, "Foto cekildi. HESAPLA'ya bas.", Toast.LENGTH_SHORT).show()
+                                if (burstActive) {
+                                    onBurstFrameCaptured()
+                                } else {
+                                    setProcessingState(false)
+                                    Toast.makeText(this@MainActivity, "Foto cekildi. HESAPLA'ya bas.", Toast.LENGTH_SHORT).show()
+                                }
                             }
                         } catch (e: Exception) {
                             Log.e(TAG, "Kamera fotografi hazirlama hatasi", e)
                             runOnUiThread {
                                 Toast.makeText(this@MainActivity, "Fotograf hazirlanamadi", Toast.LENGTH_SHORT).show()
-                                setProcessingState(false)
+                                if (burstActive) burstFrameDone(null) else setProcessingState(false)
                             }
                         } finally {
                             image.close()
@@ -614,8 +620,8 @@ class MainActivity : AppCompatActivity() {
 
                 override fun onError(exc: ImageCaptureException) {
                     Log.e(TAG, "Fotograf cekme hatasi", exc)
-                    setProcessingState(false)
                     Toast.makeText(this@MainActivity, "Fotograf cekilemedi", Toast.LENGTH_SHORT).show()
+                    if (burstActive) burstFrameDone(null) else setProcessingState(false)
                 }
             }
         )
@@ -691,16 +697,27 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** @return (basarili, aciklama). Basariliysa sonuc ekrana yazilmis ve isleme durumu kapatilmistir. */
-    private fun tryZenithLocate(
+    private class ZenithComputation(
+        val out: ZenithOutcome,
+        val spreadDeg: Double,
+        /** Kareler arasi ortak (azalmayan) egim belirsizligi. */
+        val systematicSigmaDeg: Double,
+        val timeSigmaSec: Double,
+        val calNote: String
+    ) {
+        val tiltSigmaDeg: Double get() = Math.hypot(spreadDeg, systematicSigmaDeg)
+    }
+
+    /** Tek kare zenit hesabi (arka is parcacigi). @return (sonuc, basarisizlik nedeni) */
+    private fun computeZenith(
         bitmap: Bitmap,
         source: CaptureSource,
         observationDateTime: LocalDateTime,
         calibration: OrientationCalibration
-    ): Pair<Boolean, String> {
-        val locator = zenithLocator ?: return Pair(false, "katalog hazir degil")
+    ): Pair<ZenithComputation?, String> {
+        val locator = zenithLocator ?: return Pair(null, "katalog hazir degil")
         if (calibration.note.contains("varsayim", ignoreCase = true)) {
-            return Pair(false, "egim verisi yok (Pitch/Roll elle girin)")
+            return Pair(null, "egim verisi yok (Pitch/Roll elle girin)")
         }
         return try {
             val stars = starDetector.detectStars(bitmap)
@@ -711,17 +728,18 @@ class MainActivity : AppCompatActivity() {
             val fused = source == CaptureSource.CAMERA && selectedUpMeasured != null && calibration.note.contains("füzyonu")
             val rot = selectedDisplayRotationDeg
             val calibrated = fused && tiltCalibration.isCalibrated(rot)
-            val spread = (selectedTiltSpreadDeg ?: 0.5f).toDouble()
-            val tiltSigma = when {
+            val spread = if (fused) (selectedTiltSpreadDeg ?: 0.5f).toDouble() else 0.0
+            val sysSigma = when {
                 calibrated -> {
                     val r = tiltCalibration.residualDeg(rot).let { if (it.isNaN()) 0.1 else it }
-                    Math.sqrt(spread * spread + 0.05 * 0.05 + r * r / tiltCalibration.frameCount(rot))
+                    Math.sqrt(0.05 * 0.05 + r * r / tiltCalibration.frameCount(rot))
                 }
-                fused -> Math.hypot(spread, 0.5)
+                fused -> 0.5
                 calibration.note.contains("Manuel") -> 1.0
                 calibration.note.contains("Ufuk") -> 1.5
                 else -> 2.0
             }
+            val tiltSigma = Math.hypot(spread, sysSigma)
             val calNote = if (calibrated) "Sensor kalibreli (${tiltCalibration.frameCount(rot)} kare)" else "Sensor KALIBRE DEGIL (KALIBRE ET onerilir)"
             val out = if (calibrated) {
                 locator.locate(
@@ -738,32 +756,125 @@ class MainActivity : AppCompatActivity() {
                     epochMillis = epochMs, tiltSigmaDeg = tiltSigma, timeSigmaSec = timeSigma
                 )
             }
-            if (!out.ok) return Pair(false, out.message)
-            val plate = out.plate!!
-            runOnUiThread {
-                resultTextView.text = String.format(
-                    Locale.US,
-                    "Konum: %.4f°%s %.4f°%s | tahmini hata ~%.0f km (%%68), ~%.0f km (%%95)",
-                    abs(out.latitudeDeg), if (out.latitudeDeg >= 0) "K" else "G",
-                    abs(out.longitudeDeg), if (out.longitudeDeg >= 0) "D" else "B",
-                    out.errorKm68, out.errorKm95
-                )
-                infoTextView.text = String.format(
-                    Locale.US,
-                    "Zenit yontemi | Esleşen yildiz %d/%d (rms %.3f°) | Gorus acisi %.1f° | Kamera yuksekligi %.0f° | %s | Egim hatasi ±%.2f° | Saat hatasi ±%.0f sn",
-                    plate.matchedStars, plate.usedStars, plate.rmsDeg, plate.longSideFovDeg, out.boresightAltitudeDeg,
-                    calibration.note + " | " + calNote, tiltSigma, timeSigma
-                )
-                lastEstimatedLatitude = out.latitudeDeg
-                lastEstimatedLongitude = out.longitudeDeg
-                showMapButton.isEnabled = true
-                setProcessingState(false)
-            }
-            Pair(true, "ok")
+            if (!out.ok) Pair(null, out.message) else Pair(ZenithComputation(out, spread, sysSigma, timeSigma, calNote), "ok")
         } catch (e: Exception) {
             Log.e(TAG, "Zenit hesabi hatasi", e)
-            Pair(false, "hata: ${e.message}")
+            Pair(null, "hata: ${e.message}")
         }
+    }
+
+    /** @return (basarili, aciklama). Basariliysa sonuc ekrana yazilmis ve isleme durumu kapatilmistir. */
+    private fun tryZenithLocate(
+        bitmap: Bitmap,
+        source: CaptureSource,
+        observationDateTime: LocalDateTime,
+        calibration: OrientationCalibration
+    ): Pair<Boolean, String> {
+        val (comp, reason) = computeZenith(bitmap, source, observationDateTime, calibration)
+        if (comp == null) return Pair(false, reason)
+        val out = comp.out
+        val plate = out.plate!!
+        runOnUiThread {
+            resultTextView.text = String.format(
+                Locale.US,
+                "Konum: %.4f°%s %.4f°%s | tahmini hata ~%.0f km (%%68), ~%.0f km (%%95)",
+                abs(out.latitudeDeg), if (out.latitudeDeg >= 0) "K" else "G",
+                abs(out.longitudeDeg), if (out.longitudeDeg >= 0) "D" else "B",
+                out.errorKm68, out.errorKm95
+            )
+            infoTextView.text = String.format(
+                Locale.US,
+                "Zenit yontemi | Esleşen yildiz %d/%d (rms %.3f°) | Gorus acisi %.1f° | Kamera yuksekligi %.0f° | %s | Egim hatasi ±%.2f° | Saat hatasi ±%.0f sn",
+                plate.matchedStars, plate.usedStars, plate.rmsDeg, plate.longSideFovDeg, out.boresightAltitudeDeg,
+                calibration.note + " | " + comp.calNote, comp.tiltSigmaDeg, comp.timeSigmaSec
+            )
+            lastEstimatedLatitude = out.latitudeDeg
+            lastEstimatedLongitude = out.longitudeDeg
+            showMapButton.isEnabled = true
+            setProcessingState(false)
+        }
+        return Pair(true, "ok")
+    }
+
+    // ------------------------------------------------------------ seri cekim (N kare ortalamasi)
+
+    private var burstActive = false
+    private var burstIndex = 0
+    private var burstFailures = 0
+    private val burstTotal = 5
+    private val burstAverager = BurstAverager()
+    private var burstSystematicSigma = 0.5
+    private var burstTimeSigma = 2.0
+    private var burstLastNote = ""
+
+    /** CEK / otomatik cekim girisi: seri mod aciksa 5 kare, degilse tek kare. */
+    private fun startCaptureSequence() {
+        if (::burstSwitch.isInitialized && burstSwitch.isChecked && zenithLocator != null) {
+            burstActive = true; burstIndex = 0; burstFailures = 0; burstAverager.clear()
+            resultTextView.text = "Seri cekim basladi: telefonu sabit tutun (0/$burstTotal)"
+        } else {
+            burstActive = false
+        }
+        takePhotoForSelection()
+    }
+
+    /** UI is parcacigi: bir kare cekildi (setSelectedPhoto yapildi). */
+    private fun onBurstFrameCaptured() {
+        val bitmap = selectedBitmap
+        val dt = resolveObservationDateTime(CaptureSource.CAMERA)
+        if (bitmap == null || dt == null) { burstFrameDone(null); return }
+        val calibration = resolveOrientationCalibration(CaptureSource.CAMERA, bitmap.height, verticalFov, hemisphereMode)
+        resultTextView.text = "Seri cekim: kare ${burstIndex + 1}/$burstTotal isleniyor…"
+        cameraExecutor.execute {
+            val (comp, reason) = computeZenith(bitmap, CaptureSource.CAMERA, dt, calibration)
+            if (comp == null) burstLastNote = reason
+            runOnUiThread { burstFrameDone(comp) }
+        }
+    }
+
+    /** UI is parcacigi: bir kare bitti (basarili ya da degil). */
+    private fun burstFrameDone(comp: ZenithComputation?) {
+        if (comp != null) {
+            burstAverager.add(comp.out.latitudeDeg, comp.out.longitudeDeg, comp.spreadDeg, comp.out.plate!!.rmsDeg)
+            burstSystematicSigma = comp.systematicSigmaDeg
+            burstTimeSigma = comp.timeSigmaSec
+            burstLastNote = comp.calNote
+        } else {
+            burstFailures++
+        }
+        burstIndex++
+        val abortEarly = burstIndex >= 2 && burstAverager.count == 0
+        if (burstIndex < burstTotal && !abortEarly) {
+            resultTextView.text = "Seri cekim: $burstIndex/$burstTotal tamam, telefonu sabit tutun"
+            aimHandler.postDelayed({ if (burstActive) takePhotoForSelection() }, 600L)
+        } else {
+            finishBurst()
+        }
+    }
+
+    private fun finishBurst() {
+        burstActive = false
+        val fix = burstAverager.result(burstSystematicSigma, burstTimeSigma)
+        setProcessingState(false)
+        if (fix == null) {
+            resultTextView.text = "Seri cekim: hicbir karede yildiz cozumu yok ($burstLastNote)"
+            return
+        }
+        resultTextView.text = String.format(
+            Locale.US,
+            "Konum: %.4f°%s %.4f°%s | tahmini hata ~%.0f km (%%68), ~%.0f km (%%95)",
+            abs(fix.latitudeDeg), if (fix.latitudeDeg >= 0) "K" else "G",
+            abs(fix.longitudeDeg), if (fix.longitudeDeg >= 0) "D" else "B",
+            fix.errorKm68, fix.errorKm95
+        )
+        infoTextView.text = String.format(
+            Locale.US,
+            "Zenit yontemi, seri cekim: %d/%d kare kullanildi | kareler arasi yayilma ~%.1f km | Egim belirsizligi ±%.2f° | %s",
+            fix.framesUsed, fix.framesTotal, fix.scatterKm, fix.tiltSigmaDeg, burstLastNote
+        )
+        lastEstimatedLatitude = fix.latitudeDeg
+        lastEstimatedLongitude = fix.longitudeDeg
+        showMapButton.isEnabled = true
     }
 
     private fun processBitmap(

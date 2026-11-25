@@ -256,3 +256,9 @@ HESAPLA'ya basinca uygulama once zenit yontemini dener (internet gerekmez):
 Hata butcesi: 1° egim hatasi ~111 km; saat 1 sn ~0.35 km; plaka cozumu ~0.5 km. Bu yuzden telefonu sabit tutun (aci rehberi).
 Katalog uretimi: `python3 tools/build_star_catalog.py <stars.6.json> 5.5` (kaynak lisansi: NOTICE_STAR_CATALOG.txt).
 Lens distorsiyonu modellenmez; FOV kamera metadatasindan alinir (+-%7 tolere edilir).
+
+### Hatayi dusuren adimlar
+- Sensor kalibrasyonu (KALIBRE ET): bilinen konumda cekilen karelerden telefonun sabit egim sapmasi ogrenilir (en az 8-10 kare).
+- Seri cekim: 5 kare ayri cozulur, titreme agirlikli ortalama alinir (aykiri kareler atilir); hata ~1/sqrt(N) azalir.
+- Atmosfer kirilmasi: yildizlarin gorunur konumlari zenite dogru kayar; plaka cozumunde duzeltilir.
+- Otomatik cekim: halka dolunca (aci dogru ve titreme <0.1°) kendisi ceker.

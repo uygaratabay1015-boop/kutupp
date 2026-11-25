@@ -255,6 +255,17 @@
             android:textSize="11sp"
             android:fontFamily="monospace" />
 
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/burstSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:checked="true"
+            android:text="Seri cekim: 5 kare ortalamasi (daha dusuk hata)"
+            android:textColor="@color/light_gray"
+            android:textSize="11sp"
+            android:fontFamily="monospace" />
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

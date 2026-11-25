@@ -326,6 +326,48 @@ class StarPlateSolver(
         return finalize(best, obs.size, cx, cy)
     }
 
+    /**
+     * Atmosfer kirilmasi duzeltmesi: gozlenen (gorunur) yildizlar zenite dogru kayar (Saemundsson formulu).
+     * Eslesen yildizlarin katalog vektorlerini gorunur konumlarina kaydirip donusumu yeniden uydurur.
+     * Aksi halde sabit bir kayma (~1 km) zenit yonune yansir.
+     * @param upCam yaklasik zenit yonu (kamera ekseninde)
+     */
+    fun correctForRefraction(stars: List<Star>, widthPx: Int, heightPx: Int, plate: PlateSolution, upCam: DoubleArray): PlateSolution {
+        val cx = widthPx / 2.0; val cy = heightPx / 2.0
+        val f = (max(widthPx, heightPx) / 2.0) / tan(Math.toRadians(plate.longSideFovDeg) / 2.0)
+        val obs = stars.sortedByDescending { it.brightness }.take(40).map { Obs(it.x.toDouble(), it.y.toDouble()) }
+        val un = sqrt(upCam[0] * upCam[0] + upCam[1] * upCam[1] + upCam[2] * upCam[2])
+        val upN = doubleArrayOf(upCam[0] / un, upCam[1] / un, upCam[2] / un)
+        var r = plate.celFromCam
+        repeat(2) {
+            val z = mulVec(r, upN)
+            val used = HashSet<Int>()
+            val cams = ArrayList<DoubleArray>(); val apparent = ArrayList<DoubleArray>()
+            for (o in obs) {
+                val cv = camVec(o, cx, cy, f)
+                val (i, _) = nearestCatalog(mulVec(r, cv), Math.toRadians(0.15), 5.5f)
+                if (i < 0 || !used.add(i)) continue
+                val v = starVec(i)
+                val sinAlt = (v[0] * z[0] + v[1] * z[1] + v[2] * z[2]).coerceIn(-1.0, 1.0)
+                val altDeg = Math.toDegrees(kotlin.math.asin(sinAlt))
+                if (altDeg < 8.0) continue
+                val rho = Math.toRadians(1.02 / tan(Math.toRadians(altDeg + 10.3 / (altDeg + 5.11))) / 60.0)
+                val tx = z[0] - sinAlt * v[0]; val ty = z[1] - sinAlt * v[1]; val tz = z[2] - sinAlt * v[2]
+                val tn = sqrt(tx * tx + ty * ty + tz * tz)
+                if (tn < 1e-9) continue
+                val c = cos(rho); val sn = sin(rho)
+                cams.add(cv)
+                apparent.add(doubleArrayOf(v[0] * c + sn * tx / tn, v[1] * c + sn * ty / tn, v[2] * c + sn * tz / tn))
+            }
+            if (cams.size < 6) return plate
+            r = fitRotation(cams, apparent)
+        }
+        val bore = mulVec(r, doubleArrayOf(0.0, 0.0, 1.0))
+        val ra = (Math.toDegrees(kotlin.math.atan2(bore[1], bore[0])) + 360.0) % 360.0
+        val dec = Math.toDegrees(kotlin.math.asin(bore[2].coerceIn(-1.0, 1.0)))
+        return plate.copy(celFromCam = r, boresightRaDeg = ra, boresightDecDeg = dec)
+    }
+
     private fun starVec(i: Int) = doubleArrayOf(catalog.vec[3 * i], catalog.vec[3 * i + 1], catalog.vec[3 * i + 2])
 
     /** (a->i, b->j) icin ucuncu gozlem c ve katalog yildizi k bul: acilar uyusmali. */

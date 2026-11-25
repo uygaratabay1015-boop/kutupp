@@ -32,12 +32,20 @@ class TiltCalibrationTest {
         return Array(3) { i -> doubleArrayOf(xi[i], yi[i], zi[i]) }
     }
 
-    private fun synth(rng: Random, r: Array<DoubleArray>, fovDeg: Double, w: Int, h: Int): List<Star> {
+    private fun synth(rng: Random, r: Array<DoubleArray>, fovDeg: Double, w: Int, h: Int, zenith: DoubleArray? = null): List<Star> {
         val f = (max(w, h) / 2.0) / tan(Math.toRadians(fovDeg) / 2)
         val out = ArrayList<Star>()
         for (i in 0 until catalog.size) {
             if (catalog.mag[i] > 4.6f || rng.nextDouble() < 0.25) continue
-            val v = doubleArrayOf(catalog.vec[3 * i], catalog.vec[3 * i + 1], catalog.vec[3 * i + 2])
+            var v = doubleArrayOf(catalog.vec[3 * i], catalog.vec[3 * i + 1], catalog.vec[3 * i + 2])
+            if (zenith != null) { // gercek atmosfer kirilmasi: gorunen konum zenite dogru kayar
+                val sa = (v[0] * zenith[0] + v[1] * zenith[1] + v[2] * zenith[2]).coerceIn(-1.0, 1.0)
+                val alt = Math.toDegrees(asin(sa))
+                if (alt < 8.0) continue
+                val rho = Math.toRadians(1.02 / tan(Math.toRadians(alt + 10.3 / (alt + 5.11))) / 60.0)
+                val t = DoubleArray(3) { zenith[it] - sa * v[it] }; val tn = sqrt(t.sumOf { it * it })
+                v = DoubleArray(3) { v[it] * cos(rho) + sin(rho) * t[it] / tn }
+            }
             val cam = DoubleArray(3) { k -> r[0][k] * v[0] + r[1][k] * v[1] + r[2][k] * v[2] }
             if (cam[2] <= 0.05) continue
             val x = w / 2.0 + f * cam[0] / cam[2] + rng.nextGaussian() * 0.7
@@ -112,5 +120,67 @@ class TiltCalibrationTest {
                 .format(hand, m(before, .5), m(before, .95), m(after, .5), m(after, .68), m(after, .95), after.size))
             assertTrue("kalibrasyon iyilestirmedi", m(after, .5) < 0.4 * m(before, .5))
         }
+    }
+
+    /** Atmosfer kirilmasi simule edilir; duzeltme ac/kapa karsilastirmasi (sensor hatasi yok). */
+    @Test fun refractionCorrectionReducesError() {
+        val rng = Random(31)
+        val locator = ZenithLocator(solver)
+        val off = ArrayList<Double>(); val on = ArrayList<Double>()
+        repeat(60) {
+            val lat = Math.toDegrees(asin(rng.nextDouble() * 2 - 1)); val lon = rng.nextDouble() * 360 - 180
+            val day0 = 1_795_000_000_000L + (rng.nextDouble() * 365 * 86400e3).toLong()
+            val epoch = day0 - day0 % 86_400_000L + ((22.0 + rng.nextDouble() * 4 - lon / 15.0) * 3_600_000).toLong()
+            val pitch = 55.0 + rng.nextDouble() * 20; val roll = (rng.nextDouble() - .5) * 4
+            val r = sceneRotation(lat, lon, epoch, pitch, roll, rng.nextDouble() * 2 * PI)
+            val z = ZenithFix.zenithIcrs(lat, lon, epoch)
+            val stars = synth(rng, r, 66.0, 4000, 3000, zenith = z)
+            val up = ZenithFix.upFromTilt(pitch, roll)
+            for (flag in listOf(false, true)) {
+                val o = locator.locate(stars, 4000, 3000, 66.0, up, epoch, 0.0, 0.0, 5000, correctRefraction = flag)
+                if (!o.ok) return@repeat
+                (if (flag) on else off).add(ZenithFix.greatCircleKm(lat, lon, o.latitudeDeg, o.longitudeDeg))
+            }
+        }
+        off.sort(); on.sort()
+        println("KIRILMA: duzeltmesiz medyan %.2f km %%95 %.2f | duzeltmeli medyan %.2f km %%95 %.2f (n=%d)".format(off[off.size / 2], off[(off.size * .95).toInt().coerceAtMost(off.size - 1)], on[on.size / 2], on[(on.size * .95).toInt().coerceAtMost(on.size - 1)], on.size))
+        assertTrue(on[on.size / 2] < off[off.size / 2])
+    }
+
+    @Test fun burstAverageBeatsSingleFrame() {
+        val rng = Random(77)
+        val locator = ZenithLocator(solver)
+        val single = ArrayList<Double>(); val burst = ArrayList<Double>()
+        repeat(30) {
+            val lat = Math.toDegrees(asin(rng.nextDouble() * 2 - 1)); val lon = rng.nextDouble() * 360 - 180
+            val day0 = 1_795_000_000_000L + (rng.nextDouble() * 365 * 86400e3).toLong()
+            val epoch = day0 - day0 % 86_400_000L + ((22.0 + rng.nextDouble() * 4 - lon / 15.0) * 3_600_000).toLong()
+            val pitch = 58.0 + rng.nextDouble() * 14; val roll = (rng.nextDouble() - .5) * 4
+            val r = sceneRotation(lat, lon, epoch, pitch, roll, rng.nextDouble() * 2 * PI)
+            val z = ZenithFix.zenithIcrs(lat, lon, epoch)
+            val up = ZenithFix.upFromTilt(pitch, roll)
+            val avg = BurstAverager()
+            repeat(5) { k ->
+                val stars = synth(rng, r, 66.0, 4000, 3000, zenith = z)
+                val noisy = unit(DoubleArray(3) { up[it] + Math.toRadians(0.1) * rng.nextGaussian() })
+                val o = locator.locate(stars, 4000, 3000, 66.0, noisy, epoch + k * 2000L, 0.1, 1.0, 5000)
+                if (o.ok) {
+                    avg.add(o.latitudeDeg, o.longitudeDeg, 0.1, o.plate!!.rmsDeg)
+                    if (k == 0) single.add(ZenithFix.greatCircleKm(lat, lon, o.latitudeDeg, o.longitudeDeg))
+                }
+            }
+            // kareler farkli zamanda ayni sabit gokyuzu: konumlari ayni gercek yere gore karsilastir (dakikalik fark ihmal)
+            avg.result(0.0, 1.0)?.let { burst.add(ZenithFix.greatCircleKm(lat, lon, it.latitudeDeg, it.longitudeDeg)) }
+        }
+        single.sort(); burst.sort()
+        println("SERI: tek kare medyan %.1f km | 5 kare ortalama medyan %.1f km (n=%d)".format(single[single.size / 2], burst[burst.size / 2], burst.size))
+        assertTrue(burst[burst.size / 2] < 0.7 * single[single.size / 2])
+    }
+
+    @Test fun burstRejectsOutlier() {
+        val a = BurstAverager()
+        a.add(41.0, 29.0, 0.1); a.add(41.02, 29.01, 0.1); a.add(40.99, 28.99, 0.1); a.add(45.0, 35.0, 0.1)
+        val r = a.result(0.0, 1.0)!!
+        assertEquals(3, r.framesUsed); assertEquals(41.0, r.latitudeDeg, 0.05)
     }
 }
