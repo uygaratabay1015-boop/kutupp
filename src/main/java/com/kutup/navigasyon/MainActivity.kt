@@ -23,6 +23,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.TextView
 import android.widget.Toast
@@ -118,13 +119,26 @@ class MainActivity : AppCompatActivity() {
         override fun run() {
             if (::tiltSensor.isInitialized && ::aimGuideView.isInitialized) {
                 val tilt = tiltSensor.estimateForCapture(previewView.display?.rotation ?: android.view.Surface.ROTATION_0, 0.7)
-                aimGuideView.update(aimGuide.evaluate(tilt, android.os.SystemClock.elapsedRealtime()))
+                val aimState = aimGuide.evaluate(tilt, android.os.SystemClock.elapsedRealtime())
+                aimGuideView.update(aimState)
+                val nowMs = android.os.SystemClock.elapsedRealtime()
+                if (aimState.ready && autoShutterSwitch.isChecked && !isProcessing && imageCapture != null && nowMs - lastAutoShotMs > 6000L) {
+                    lastAutoShotMs = nowMs
+                    aimGuide.reset()
+                    takePhotoForSelection()
+                }
             }
             aimHandler.postDelayed(this, 100L)
         }
     }
     private var selectedTiltLabel: String? = null
     private var selectedTiltSpreadDeg: Float? = null
+    private var selectedDisplayRotationDeg: Int = 0
+    private var selectedUpMeasured: DoubleArray? = null
+    private var tiltCalibration = TiltCalibration()
+    private lateinit var calibrateButton: Button
+    private lateinit var autoShutterSwitch: SwitchCompat
+    private var lastAutoShotMs = 0L
     private var selectedCaptureEpochMs: Long? = null
     @Volatile private var zenithLocator: ZenithLocator? = null
     private lateinit var starDetector: StarDetector
@@ -251,6 +265,14 @@ class MainActivity : AppCompatActivity() {
     private fun initializeUI() {
         previewView = findViewById(R.id.previewView)
         aimGuideView = findViewById(R.id.aimGuideView)
+        calibrateButton = findViewById(R.id.calibrateButton)
+        autoShutterSwitch = findViewById(R.id.autoShutterSwitch)
+        calibrateButton.setOnClickListener { onCalibratePressed() }
+        calibrateButton.setOnLongClickListener {
+            tiltCalibration.clear(); saveTiltCalibration()
+            Toast.makeText(this, "Sensor kalibrasyonu sifirlandi", Toast.LENGTH_SHORT).show()
+            true
+        }
         aimGuideView.setGuide(aimGuide)
         showHowToShootOnce()
         controlPanel = findViewById(R.id.controlPanel)
@@ -335,6 +357,7 @@ class MainActivity : AppCompatActivity() {
         compass = CompassSensor(this)
         tiltSensor = TiltSensor(this)
         starDetector = StarDetector()
+        tiltCalibration = TiltCalibration.deserialize(getSharedPreferences("kutup_prefs", MODE_PRIVATE).getString("tilt_cal", null))
         // Yildiz katalogu + plaka cozucu: tamamen cihaz ici (assets), arka planda hazirlanir.
         Thread {
             try {
@@ -440,6 +463,78 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun saveTiltCalibration() {
+        getSharedPreferences("kutup_prefs", MODE_PRIVATE).edit().putString("tilt_cal", tiltCalibration.serialize()).apply()
+    }
+
+    /**
+     * Sensor kalibrasyonu: BILINEN konumda cekilmis, sensor fuzyonlu bir kareyle, telefonun sabit
+     * egim sapmasini ogrenir. Ne kadar cok kare (farkli gece/aci), o kadar iyi: en az ~8-10 oneririz.
+     */
+    private fun onCalibratePressed() {
+        val bitmap = selectedBitmap
+        val upMeasured = selectedUpMeasured
+        val epochMs = selectedCaptureEpochMs
+        val locator = zenithLocator
+        if (bitmap == null || selectedSource != CaptureSource.CAMERA || upMeasured == null || epochMs == null) {
+            Toast.makeText(this, "Once uygulamanin kamerasiyla (sensor fuzyonlu) bir gece fotografi cekin", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (locator == null) {
+            Toast.makeText(this, "Yildiz katalogu hazir degil, biraz bekleyin", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val prefs = getSharedPreferences("kutup_prefs", MODE_PRIVATE)
+        val latInput = EditText(this).apply { hint = "Enlem (ornek 41.0082)"; setText(prefs.getString("cal_lat", "")) }
+        val lonInput = EditText(this).apply { hint = "Boylam (ornek 28.9784)"; setText(prefs.getString("cal_lon", "")) }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 16, 48, 0)
+            addView(latInput); addView(lonInput)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Bu fotografin cekildigi gercek konum")
+            .setMessage("Telefon sapmasini ogrenmek icin gercek enlem/boylami girin (ondalik derece, boylam dogu +). Telefon sabitken cekin.")
+            .setView(box)
+            .setNegativeButton("Iptal", null)
+            .setPositiveButton("Kalibre et") { _, _ ->
+                val lat = latInput.text.toString().replace(',', '.').toDoubleOrNull()
+                val lon = lonInput.text.toString().replace(',', '.').toDoubleOrNull()
+                if (lat == null || lon == null || lat !in -90.0..90.0 || lon !in -180.0..180.0) {
+                    Toast.makeText(this, "Gecersiz enlem/boylam", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                prefs.edit().putString("cal_lat", latInput.text.toString()).putString("cal_lon", lonInput.text.toString()).apply()
+                setProcessingState(true)
+                val rot = selectedDisplayRotationDeg
+                cameraExecutor.execute {
+                    val stars = starDetector.detectStars(bitmap)
+                    val trueUp = locator.trueUpFromKnownSite(
+                        stars, bitmap.width, bitmap.height, horizontalFov.toDouble(), lat, lon, epochMs
+                    )
+                    runOnUiThread {
+                        setProcessingState(false)
+                        if (trueUp == null) {
+                            Toast.makeText(this, "Yildizlar cozulemedi, kalibrasyon eklenmedi", Toast.LENGTH_LONG).show()
+                        } else if (!tiltCalibration.addFrame(rot, upMeasured, trueUp)) {
+                            Toast.makeText(this, "Bu kare ortalamadan cok sapti (>1.5°), atlandi. Sabit tutup tekrar cekin.", Toast.LENGTH_LONG).show()
+                        } else {
+                            saveTiltCalibration()
+                            val n = tiltCalibration.frameCount(rot)
+                            val res = tiltCalibration.residualDeg(rot)
+                            Toast.makeText(
+                                this,
+                                "Kalibrasyon: $n kare" + (if (res.isNaN()) "" else " | tutarlilik ±%.2f°".format(res)) +
+                                    (if (n < 8) " | en az 8-10 kare onerilir" else " | yeterli"),
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                }
+            }
+            .show()
+    }
+
     private fun showHowToShootOnce() {
         val prefs = getSharedPreferences("kutup_prefs", MODE_PRIVATE)
         if (prefs.getBoolean("howto_seen", false)) return
@@ -478,6 +573,8 @@ class MainActivity : AppCompatActivity() {
                     val capturePitch = if (useTilt) tilt!!.pitchDeg else compass.getPitchDegrees()
                     val captureRoll = if (useTilt) tilt!!.rollDeg else compass.getRollDegrees()
                     val captureEpochMs = System.currentTimeMillis()
+                    val captureRotationDeg = TiltEstimator.surfaceRotationToDegrees(localImageCapture.targetRotation)
+                    val upMeasured = if (useTilt) ZenithFix.upFromTilt(capturePitch.toDouble(), captureRoll.toDouble()) else null
                     val tiltSpread = if (useTilt) tilt!!.spreadDeg else null
                     val tiltLabel = if (useTilt) {
                         "Pitch/Roll: Sensor füzyonu (±%.2f°%s)".format(tilt!!.spreadDeg, if (tilt.usedGyro) ", jiroskop" else "")
@@ -496,7 +593,9 @@ class MainActivity : AppCompatActivity() {
                                     captureDateTime = nowMinutePrecision(),
                                     tiltLabel = tiltLabel,
                                     tiltSpreadDeg = tiltSpread,
-                                    captureEpochMs = captureEpochMs
+                                    captureEpochMs = captureEpochMs,
+                                    displayRotationDeg = captureRotationDeg,
+                                    upMeasured = upMeasured
                                 )
                                 setProcessingState(false)
                                 Toast.makeText(this@MainActivity, "Foto cekildi. HESAPLA'ya bas.", Toast.LENGTH_SHORT).show()
@@ -531,7 +630,9 @@ class MainActivity : AppCompatActivity() {
         captureDateTime: LocalDateTime? = null,
         tiltLabel: String? = null,
         tiltSpreadDeg: Float? = null,
-        captureEpochMs: Long? = null
+        captureEpochMs: Long? = null,
+        displayRotationDeg: Int = 0,
+        upMeasured: DoubleArray? = null
     ) {
         selectedBitmap?.recycle()
         selectedBitmap = bitmap
@@ -542,6 +643,8 @@ class MainActivity : AppCompatActivity() {
         selectedTiltLabel = if (source == CaptureSource.CAMERA) tiltLabel else null
         selectedTiltSpreadDeg = if (source == CaptureSource.CAMERA) tiltSpreadDeg else null
         selectedCaptureEpochMs = if (source == CaptureSource.CAMERA) captureEpochMs else null
+        selectedDisplayRotationDeg = displayRotationDeg
+        selectedUpMeasured = if (source == CaptureSource.CAMERA) upMeasured else null
         selectedCaptureDateTime = captureDateTime ?: nowMinutePrecision()
         if (source == CaptureSource.CAMERA) {
             selectedExifDateTime = null
@@ -605,18 +708,36 @@ class MainActivity : AppCompatActivity() {
             val epochMs = if (useExactTime) selectedCaptureEpochMs!! else
                 observationDateTime.atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
             val timeSigma = if (useExactTime) 2.0 else 30.0
+            val fused = source == CaptureSource.CAMERA && selectedUpMeasured != null && calibration.note.contains("füzyonu")
+            val rot = selectedDisplayRotationDeg
+            val calibrated = fused && tiltCalibration.isCalibrated(rot)
+            val spread = (selectedTiltSpreadDeg ?: 0.5f).toDouble()
             val tiltSigma = when {
-                calibration.note.contains("füzyonu") -> Math.hypot((selectedTiltSpreadDeg ?: 0.5f).toDouble(), 0.3)
+                calibrated -> {
+                    val r = tiltCalibration.residualDeg(rot).let { if (it.isNaN()) 0.1 else it }
+                    Math.sqrt(spread * spread + 0.05 * 0.05 + r * r / tiltCalibration.frameCount(rot))
+                }
+                fused -> Math.hypot(spread, 0.5)
                 calibration.note.contains("Manuel") -> 1.0
                 calibration.note.contains("Ufuk") -> 1.5
                 else -> 2.0
             }
-            val out = locator.locate(
-                stars = stars, widthPx = bitmap.width, heightPx = bitmap.height,
-                longSideFovDeg = horizontalFov.toDouble(),
-                pitchDeg = calibration.pitchDeg.toDouble(), rollDeg = calibration.rollDeg.toDouble(),
-                epochMillis = epochMs, tiltSigmaDeg = tiltSigma, timeSigmaSec = timeSigma
-            )
+            val calNote = if (calibrated) "Sensor kalibreli (${tiltCalibration.frameCount(rot)} kare)" else "Sensor KALIBRE DEGIL (KALIBRE ET onerilir)"
+            val out = if (calibrated) {
+                locator.locate(
+                    stars = stars, widthPx = bitmap.width, heightPx = bitmap.height,
+                    longSideFovDeg = horizontalFov.toDouble(),
+                    upCam = tiltCalibration.correct(rot, selectedUpMeasured!!),
+                    epochMillis = epochMs, tiltSigmaDeg = tiltSigma, timeSigmaSec = timeSigma
+                )
+            } else {
+                locator.locate(
+                    stars = stars, widthPx = bitmap.width, heightPx = bitmap.height,
+                    longSideFovDeg = horizontalFov.toDouble(),
+                    pitchDeg = calibration.pitchDeg.toDouble(), rollDeg = calibration.rollDeg.toDouble(),
+                    epochMillis = epochMs, tiltSigmaDeg = tiltSigma, timeSigmaSec = timeSigma
+                )
+            }
             if (!out.ok) return Pair(false, out.message)
             val plate = out.plate!!
             runOnUiThread {
@@ -631,7 +752,7 @@ class MainActivity : AppCompatActivity() {
                     Locale.US,
                     "Zenit yontemi | Esleşen yildiz %d/%d (rms %.3f°) | Gorus acisi %.1f° | Kamera yuksekligi %.0f° | %s | Egim hatasi ±%.2f° | Saat hatasi ±%.0f sn",
                     plate.matchedStars, plate.usedStars, plate.rmsDeg, plate.longSideFovDeg, out.boresightAltitudeDeg,
-                    calibration.note, tiltSigma, timeSigma
+                    calibration.note + " | " + calNote, tiltSigma, timeSigma
                 )
                 lastEstimatedLatitude = out.latitudeDeg
                 lastEstimatedLongitude = out.longitudeDeg
@@ -1098,6 +1219,7 @@ class MainActivity : AppCompatActivity() {
         isProcessing = processing
         captureButton.isEnabled = !processing && imageCapture != null
         galleryButton.isEnabled = !processing
+        if (::calibrateButton.isInitialized) calibrateButton.isEnabled = !processing
         modeButton.isEnabled = !processing
         showMapButton.isEnabled = !processing && lastEstimatedLatitude != null && lastEstimatedLongitude != null
         dateModeToday.isEnabled = !processing

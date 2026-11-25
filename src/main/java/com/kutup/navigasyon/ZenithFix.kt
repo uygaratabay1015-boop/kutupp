@@ -171,6 +171,17 @@ object ZenithFix {
         return ZenithPositionFix(lat, lon)
     }
 
+    /** Bilinen konum+zamanda zenit yonu, ICRS (solvePosition'in tersi). Sensor kalibrasyonu icin. */
+    fun zenithIcrs(latDeg: Double, lonDeg: Double, epochMillis: Long): DoubleArray {
+        val jd = julianDateUtc(epochMillis)
+        val lst = Math.toRadians(lonDeg) + greenwichApparentSiderealTime(jd)
+        val la = Math.toRadians(latDeg)
+        val zTd = doubleArrayOf(cos(la) * cos(lst), cos(la) * sin(lst), sin(la))
+        val p = precessionNutationMatrix(jd)
+        // P: ICRS -> true-of-date, ters = devrik
+        return DoubleArray(3) { i -> p[0][i] * zTd[0] + p[1][i] * zTd[1] + p[2][i] * zTd[2] }
+    }
+
     fun greatCircleKm(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
         val p1 = Math.toRadians(lat1)
         val p2 = Math.toRadians(lat2)

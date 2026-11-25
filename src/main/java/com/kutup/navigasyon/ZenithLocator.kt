@@ -32,16 +32,43 @@ class ZenithLocator(private val solver: StarPlateSolver) {
         stars: List<Star>, widthPx: Int, heightPx: Int, longSideFovDeg: Double,
         pitchDeg: Double, rollDeg: Double, epochMillis: Long,
         tiltSigmaDeg: Double, timeSigmaSec: Double, maxSolveMillis: Long = 10_000L
+    ): ZenithOutcome = locate(
+        stars, widthPx, heightPx, longSideFovDeg, ZenithFix.upFromTilt(pitchDeg, rollDeg),
+        epochMillis, tiltSigmaDeg, timeSigmaSec, maxSolveMillis
+    )
+
+    /** Dogrudan zenit yonu (kamera ekseninde, kalibrasyon uygulanmis olabilir). */
+    fun locate(
+        stars: List<Star>, widthPx: Int, heightPx: Int, longSideFovDeg: Double,
+        upCam: DoubleArray, epochMillis: Long,
+        tiltSigmaDeg: Double, timeSigmaSec: Double, maxSolveMillis: Long = 10_000L
     ): ZenithOutcome {
         if (stars.size < 8) return ZenithOutcome(false, message = "Yeterli yildiz yok (${stars.size}); en az ~8 gerekir")
-        val plate = solver.solve(stars, widthPx, heightPx, longSideFovDeg, maxMillis = maxSolveMillis)
+        val plate = solvePlate(stars, widthPx, heightPx, longSideFovDeg, maxSolveMillis)
             ?: return ZenithOutcome(false, message = "Yildizlar katalogla eslestirilemedi (bulut/isik kirliligi/yanlis gorus acisi?)")
-        val up = ZenithFix.upFromTilt(pitchDeg, rollDeg)
-        val alt = ZenithFix.boresightAltitudeDeg(up)
+        val alt = ZenithFix.boresightAltitudeDeg(upCam)
         if (alt < 5.0) return ZenithOutcome(false, message = "Egim verisi tutarsiz (kamera yuksekligi ${"%.0f".format(alt)}°)", plate = plate)
-        val fix = ZenithFix.solvePosition(plate.celFromCam, up, epochMillis)
+        val fix = ZenithFix.solvePosition(plate.celFromCam, upCam, epochMillis)
         val (e68, e95) = estimateErrorKm(fix.latitudeDeg, tiltSigmaDeg, timeSigmaSec, plate.rmsDeg)
         return ZenithOutcome(true, fix.latitudeDeg, fix.longitudeDeg, e68, e95, "Zenit yontemi", plate, alt)
+    }
+
+    fun solvePlate(stars: List<Star>, widthPx: Int, heightPx: Int, longSideFovDeg: Double, maxSolveMillis: Long = 10_000L): PlateSolution? =
+        solver.solve(stars, widthPx, heightPx, longSideFovDeg, maxMillis = maxSolveMillis)
+
+    /**
+     * Kalibrasyon karesi: bilinen konum/saat + yildiz cozumu -> gercek zenit yonu (kamera ekseninde).
+     * @return null: yildizlar cozulemedi.
+     */
+    fun trueUpFromKnownSite(
+        stars: List<Star>, widthPx: Int, heightPx: Int, longSideFovDeg: Double,
+        knownLatDeg: Double, knownLonDeg: Double, epochMillis: Long, maxSolveMillis: Long = 10_000L
+    ): DoubleArray? {
+        val plate = solvePlate(stars, widthPx, heightPx, longSideFovDeg, maxSolveMillis) ?: return null
+        val z = ZenithFix.zenithIcrs(knownLatDeg, knownLonDeg, epochMillis)
+        val r = plate.celFromCam
+        // cam = R^T cel
+        return DoubleArray(3) { k -> r[0][k] * z[0] + r[1][k] * z[1] + r[2][k] * z[2] }
     }
 
     companion object {

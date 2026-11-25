@@ -28,7 +28,7 @@ class AimGuide(
     minPitchDeg: Float = 55f,
     maxPitchDeg: Float = 75f,
     val rollTolDeg: Float = 3f,
-    val steadySpreadDeg: Float = 0.2f,
+    val steadySpreadDeg: Float = 0.1f,
     val holdMs: Long = 2000L
 ) {
     var minPitchDeg: Float = minPitchDeg
