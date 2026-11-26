@@ -262,3 +262,6 @@ Lens distorsiyonu modellenmez; FOV kamera metadatasindan alinir (+-%7 tolere edi
 - Seri cekim: 5 kare ayri cozulur, titreme agirlikli ortalama alinir (aykiri kareler atilir); hata ~1/sqrt(N) azalir.
 - Atmosfer kirilmasi: yildizlarin gorunur konumlari zenite dogru kayar; plaka cozumunde duzeltilir.
 - Otomatik cekim: halka dolunca (aci dogru ve titreme <0.1°) kendisi ceker.
+- Dondurme (swing) kendi kendine kalibrasyon: seri cekimde (8 kare) her karede telefon AYNI egimle ~90° dondurulur;
+  sabit sensor sapmasi her karede dunya cercevesinde farkli yone doner, `SwingSolver` bunu konum dagilimindan kestirip giderir.
+  Bilinen konum gerekmez. Simulasyon: bilinmeyen 0.6° sapmada medyan ~4 km (el titremesi 0.1°), ~1.6 km (cok sabit).

@@ -122,7 +122,14 @@ class MainActivity : AppCompatActivity() {
                 val aimState = aimGuide.evaluate(tilt, android.os.SystemClock.elapsedRealtime())
                 aimGuideView.update(aimState)
                 val nowMs = android.os.SystemClock.elapsedRealtime()
-                if (aimState.ready && autoShutterSwitch.isChecked && !isProcessing && imageCapture != null && nowMs - lastAutoShotMs > 6000L) {
+                if (burstWaiting && !isProcessing && imageCapture != null && aimState.ready) {
+                    val turned = angleDiffDeg(compass.getAzimuth().toDouble(), burstLastCompassAz) >= 60.0
+                    if (turned || nowMs - burstWaitStartMs > 20000L) {
+                        burstWaiting = false
+                        aimGuide.reset()
+                        takePhotoForSelection()
+                    }
+                } else if (!burstActive && aimState.ready && autoShutterSwitch.isChecked && !isProcessing && imageCapture != null && nowMs - lastAutoShotMs > 6000L) {
                     lastAutoShotMs = nowMs
                     aimGuide.reset()
                     startCaptureSequence()
@@ -547,7 +554,8 @@ class MainActivity : AppCompatActivity() {
                 "2) Beyaz cizgiler ile hareketli cizgiyi ust uste getirin (telefon yana yatik olmasin).\n" +
                 "3) Mumkunse tripod kullanin veya telefonu bir yere dayayin; elde tutarken kolunuzu govdenize yaslayin.\n" +
                 "4) Halka dolup 'Hazir!' yazinca cekin; cekim sirasinda telefona dokunup sarsmayin.\n" +
-                "5) Saatin ve saat diliminin dogru oldugundan emin olun.\n\n" +
+                "5) Seri cekimde (8 kare) her karede telefonu AYNI egimle ~90° yana dondurun: boylece sensor sapmasi kendiliginden giderilir.\n" +
+                "6) Saatin ve saat diliminin dogru oldugundan emin olun.\n\n" +
                 "Not: 1° egim hatasi yaklasik 111 km konum hatasi demektir; sabit tutmak cok onemli."
             )
             .setPositiveButton("Anladim") { _, _ -> prefs.edit().putBoolean("howto_seen", true).apply() }
@@ -703,7 +711,10 @@ class MainActivity : AppCompatActivity() {
         /** Kareler arasi ortak (azalmayan) egim belirsizligi. */
         val systematicSigmaDeg: Double,
         val timeSigmaSec: Double,
-        val calNote: String
+        val calNote: String,
+        /** Karede kullanilan zenit yonu (kamera ekseninde, kalibrasyon uygulanmis olabilir). */
+        val upUsedCam: DoubleArray,
+        val epochMs: Long
     ) {
         val tiltSigmaDeg: Double get() = Math.hypot(spreadDeg, systematicSigmaDeg)
     }
@@ -741,6 +752,8 @@ class MainActivity : AppCompatActivity() {
             }
             val tiltSigma = Math.hypot(spread, sysSigma)
             val calNote = if (calibrated) "Sensor kalibreli (${tiltCalibration.frameCount(rot)} kare)" else "Sensor KALIBRE DEGIL (KALIBRE ET onerilir)"
+            val upUsed = if (calibrated) tiltCalibration.correct(rot, selectedUpMeasured!!)
+                else ZenithFix.upFromTilt(calibration.pitchDeg.toDouble(), calibration.rollDeg.toDouble())
             val out = if (calibrated) {
                 locator.locate(
                     stars = stars, widthPx = bitmap.width, heightPx = bitmap.height,
@@ -756,7 +769,7 @@ class MainActivity : AppCompatActivity() {
                     epochMillis = epochMs, tiltSigmaDeg = tiltSigma, timeSigmaSec = timeSigma
                 )
             }
-            if (!out.ok) Pair(null, out.message) else Pair(ZenithComputation(out, spread, sysSigma, timeSigma, calNote), "ok")
+            if (!out.ok) Pair(null, out.message) else Pair(ZenithComputation(out, spread, sysSigma, timeSigma, calNote, upUsed, epochMs), "ok")
         } catch (e: Exception) {
             Log.e(TAG, "Zenit hesabi hatasi", e)
             Pair(null, "hata: ${e.message}")
@@ -796,21 +809,33 @@ class MainActivity : AppCompatActivity() {
         return Pair(true, "ok")
     }
 
-    // ------------------------------------------------------------ seri cekim (N kare ortalamasi)
+    // ------------------------------------------------------------ seri cekim (dondurme)
+    // Ayni yerden, ayni egimle ama 4 farkli yone bakarak (x2 tur) cekilen karelerde sabit sensor sapmasi
+    // her karede dunya cercevesinde farkli yone doner; SwingSolver bunu konum dagilimindan kestirip giderir.
 
     private var burstActive = false
+    private var burstWaiting = false
     private var burstIndex = 0
-    private var burstFailures = 0
-    private val burstTotal = 5
-    private val burstAverager = BurstAverager()
+    private val burstTotal = 8
+    private val burstFrames = ArrayList<SwingFrame>()
     private var burstSystematicSigma = 0.5
     private var burstTimeSigma = 2.0
+    private var burstPlateRms = 0.02
     private var burstLastNote = ""
+    private var burstLastCompassAz = 0.0
+    private var burstWaitStartMs = 0L
 
-    /** CEK / otomatik cekim girisi: seri mod aciksa 5 kare, degilse tek kare. */
+    private fun angleDiffDeg(a: Double, b: Double): Double {
+        val d = Math.abs(a - b) % 360.0
+        return if (d > 180.0) 360.0 - d else d
+    }
+
+    /** CEK / otomatik cekim girisi: seri mod aciksa 8 kare (4 yon), degilse tek kare. */
     private fun startCaptureSequence() {
+        if (burstActive) { finishBurst(); return }
         if (::burstSwitch.isInitialized && burstSwitch.isChecked && zenithLocator != null) {
-            burstActive = true; burstIndex = 0; burstFailures = 0; burstAverager.clear()
+            burstActive = true; burstWaiting = false; burstIndex = 0; burstFrames.clear()
+            burstLastNote = ""
             resultTextView.text = "Seri cekim basladi: telefonu sabit tutun (0/$burstTotal)"
         } else {
             burstActive = false
@@ -822,6 +847,7 @@ class MainActivity : AppCompatActivity() {
     private fun onBurstFrameCaptured() {
         val bitmap = selectedBitmap
         val dt = resolveObservationDateTime(CaptureSource.CAMERA)
+        burstLastCompassAz = selectedCameraAzimuthDeg?.toDouble() ?: 0.0
         if (bitmap == null || dt == null) { burstFrameDone(null); return }
         val calibration = resolveOrientationCalibration(CaptureSource.CAMERA, bitmap.height, verticalFov, hemisphereMode)
         resultTextView.text = "Seri cekim: kare ${burstIndex + 1}/$burstTotal isleniyor…"
@@ -835,18 +861,24 @@ class MainActivity : AppCompatActivity() {
     /** UI is parcacigi: bir kare bitti (basarili ya da degil). */
     private fun burstFrameDone(comp: ZenithComputation?) {
         if (comp != null) {
-            burstAverager.add(comp.out.latitudeDeg, comp.out.longitudeDeg, comp.spreadDeg, comp.out.plate!!.rmsDeg)
+            val plate = comp.out.plate!!
+            burstFrames.add(SwingFrame(plate.celFromCam, comp.upUsedCam, comp.epochMs, Math.max(comp.spreadDeg, 0.03)))
             burstSystematicSigma = comp.systematicSigmaDeg
             burstTimeSigma = comp.timeSigmaSec
+            burstPlateRms = plate.rmsDeg
             burstLastNote = comp.calNote
-        } else {
-            burstFailures++
         }
         burstIndex++
-        val abortEarly = burstIndex >= 2 && burstAverager.count == 0
+        val abortEarly = burstIndex >= 3 && burstFrames.isEmpty()
         if (burstIndex < burstTotal && !abortEarly) {
-            resultTextView.text = "Seri cekim: $burstIndex/$burstTotal tamam, telefonu sabit tutun"
-            aimHandler.postDelayed({ if (burstActive) takePhotoForSelection() }, 600L)
+            // Sonraki kare: kullanici telefonu ayni egimle ~90° dondurup sabitleyince otomatik cekilir.
+            burstWaiting = true
+            burstWaitStartMs = android.os.SystemClock.elapsedRealtime()
+            aimGuide.reset()
+            setProcessingState(false)
+            captureButton.isEnabled = true
+            captureButton.text = "BITIR ($burstIndex/$burstTotal)"
+            resultTextView.text = "Kare $burstIndex/$burstTotal tamam. Telefonu AYNI egimle ~90° yana dondurup sabit tutun (otomatik cekilir; BITIR ile erken bitirin)"
         } else {
             finishBurst()
         }
@@ -854,26 +886,35 @@ class MainActivity : AppCompatActivity() {
 
     private fun finishBurst() {
         burstActive = false
-        val fix = burstAverager.result(burstSystematicSigma, burstTimeSigma)
+        burstWaiting = false
+        captureButton.text = "CEK"
         setProcessingState(false)
-        if (fix == null) {
+        val res = SwingSolver.solve(burstFrames)
+        if (res == null) {
             resultTextView.text = "Seri cekim: hicbir karede yildiz cozumu yok ($burstLastNote)"
             return
         }
+        val tiltSigma = if (res.observable) res.tiltSigmaDeg else Math.hypot(res.tiltSigmaDeg, burstSystematicSigma)
+        val (e68, e95) = ZenithLocator.estimateErrorKm(res.latitudeDeg, tiltSigma, burstTimeSigma, burstPlateRms)
         resultTextView.text = String.format(
             Locale.US,
             "Konum: %.4f°%s %.4f°%s | tahmini hata ~%.0f km (%%68), ~%.0f km (%%95)",
-            abs(fix.latitudeDeg), if (fix.latitudeDeg >= 0) "K" else "G",
-            abs(fix.longitudeDeg), if (fix.longitudeDeg >= 0) "D" else "B",
-            fix.errorKm68, fix.errorKm95
+            abs(res.latitudeDeg), if (res.latitudeDeg >= 0) "K" else "G",
+            abs(res.longitudeDeg), if (res.longitudeDeg >= 0) "D" else "B",
+            e68, e95
         )
+        val swingNote = if (res.observable) {
+            String.format(Locale.US, "yon dengesi %.2f, sensor sapmasi giderildi (~%.2f°)", res.azimuthBalance, res.offsetDeg)
+        } else {
+            "UYARI: kareler yeterince farkli yone bakmiyor (denge %.2f), sensor sapmasi giderilemedi; telefonu her karede ~90° dondurun".format(Locale.US, res.azimuthBalance)
+        }
         infoTextView.text = String.format(
             Locale.US,
-            "Zenit yontemi, seri cekim: %d/%d kare kullanildi | kareler arasi yayilma ~%.1f km | Egim belirsizligi ±%.2f° | %s",
-            fix.framesUsed, fix.framesTotal, fix.scatterKm, fix.tiltSigmaDeg, burstLastNote
+            "Zenit yontemi, seri cekim: %d kare | %s | kareler arasi yayilma %.1f → %.1f km | Egim belirsizligi ±%.2f° | %s",
+            res.framesUsed, swingNote, res.scatterBeforeKm, res.scatterAfterKm, tiltSigma, burstLastNote
         )
-        lastEstimatedLatitude = fix.latitudeDeg
-        lastEstimatedLongitude = fix.longitudeDeg
+        lastEstimatedLatitude = res.latitudeDeg
+        lastEstimatedLongitude = res.longitudeDeg
         showMapButton.isEnabled = true
     }
 

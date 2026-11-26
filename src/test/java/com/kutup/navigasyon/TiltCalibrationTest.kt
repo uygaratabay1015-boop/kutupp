@@ -183,4 +183,106 @@ class TiltCalibrationTest {
         val r = a.result(0.0, 1.0)!!
         assertEquals(3, r.framesUsed); assertEquals(41.0, r.latitudeDeg, 0.05)
     }
+
+    /** Ayni yerden 4 yone bakarak (dondurme) sabit sapmayi bilinen konum OLMADAN gidermek. */
+    @Test fun swingSelfCalibrationRemovesOffset() {
+        val rng = Random(2468)
+        val locator = ZenithLocator(solver)
+        val sameAz = ArrayList<Double>(); val ringMean = ArrayList<Double>(); val swing = ArrayList<Double>(); val dErr = ArrayList<Double>()
+        repeat(40) {
+            val lat = Math.toDegrees(asin(rng.nextDouble() * 2 - 1)); val lon = rng.nextDouble() * 360 - 180
+            val day0 = 1_795_000_000_000L + (rng.nextDouble() * 365 * 86400e3).toLong()
+            val epoch0 = day0 - day0 % 86_400_000L + ((22.0 + rng.nextDouble() * 3 - lon / 15.0) * 3_600_000).toLong()
+            val offDir = unit(doubleArrayOf(rng.nextGaussian(), rng.nextGaussian(), rng.nextGaussian()))
+            val offset = DoubleArray(3) { offDir[it] * Math.toRadians(0.6) }
+            val az0 = rng.nextDouble() * 2 * PI
+            val pitch0 = 60.0 + rng.nextDouble() * 10
+            fun shoot(k: Int, az: Double): SwingFrame? {
+                val epoch = epoch0 + k * 20_000L
+                val pitch = pitch0 + (rng.nextDouble() - .5) * 4; val roll = (rng.nextDouble() - .5) * 3
+                val r = sceneRotation(lat, lon, epoch, pitch, roll, az)
+                val z = ZenithFix.zenithIcrs(lat, lon, epoch)
+                val stars = synth(rng, r, 66.0, 4000, 3000, zenith = z)
+                val upTrue = ZenithFix.upFromTilt(pitch, roll)
+                val meas = unit(DoubleArray(3) { upTrue[it] + offset[it] + Math.toRadians(0.1) * rng.nextGaussian() })
+                val plate = solver.solve(stars, 4000, 3000, 66.0) ?: return null
+                val pr = solver.correctForRefraction(stars, 4000, 3000, plate, meas)
+                return SwingFrame(pr.celFromCam, meas, epoch, 0.1)
+            }
+            fun kmOf(fr: List<SwingFrame>, useSwing: Boolean): Double? {
+                if (fr.size < 3) return null
+                return if (useSwing) {
+                    val s = SwingSolver.solve(fr)!!; ZenithFix.greatCircleKm(lat, lon, s.latitudeDeg, s.longitudeDeg).also { _ ->
+                        dErr.add(Math.toDegrees(sqrt((0..2).sumOf { (s.offsetCamRad[it] - offset[it]).let { v -> v * v } })))
+                    }
+                } else {
+                    val a = BurstAverager()
+                    for (f in fr) { val o = ZenithFix.solvePosition(f.celFromCam, f.upMeasuredCam, f.epochMillis); a.add(o.latitudeDeg, o.longitudeDeg, 0.1) }
+                    val r = a.result(0.0, 1.0)!!; ZenithFix.greatCircleKm(lat, lon, r.latitudeDeg, r.longitudeDeg)
+                }
+            }
+            val framesSame = (0 until 4).mapNotNull { shoot(it, az0 + (rng.nextDouble() - .5) * 0.05) }
+            val framesRing = (0 until 4).mapNotNull { shoot(it, az0 + it * PI / 2 + (rng.nextDouble() - .5) * 0.5) }
+            val a = kmOf(framesSame, false); val b = kmOf(framesRing, false); val c = kmOf(framesRing, true)
+            if (a != null && b != null && c != null) { sameAz.add(a); ringMean.add(b); swing.add(c) }
+        }
+        fun med(l: List<Double>) = l.sorted()[l.size / 2]
+        fun p95(l: List<Double>) = l.sorted()[(l.size * .95).toInt().coerceAtMost(l.size - 1)]
+        println("DONDURME (sapma 0.6°, el 0.1°): ayni yon x4 medyan %.1f km (p95 %.1f) | 4 yon duz ortalama %.1f km (p95 %.1f) | 4 yon + sapma kestirimi %.1f km (p95 %.1f) | sapma kestirim hatasi medyan %.3f° (n=%d)"
+            .format(med(sameAz), p95(sameAz), med(ringMean), p95(ringMean), med(swing), p95(swing), med(dErr), swing.size))
+        assertTrue(med(swing) < 0.4 * med(sameAz))
+    }
+
+    @Test fun swingBalanceAndAzimuth() {
+        val epoch = 1_795_300_000_000L
+        fun fr(az: Double): SwingFrame {
+            val r = sceneRotation(41.0, 29.0, epoch, 64.0, 0.0, az)
+            return SwingFrame(r, ZenithFix.upFromTilt(64.0, 0.0), epoch, 0.1)
+        }
+        val same = listOf(fr(1.0), fr(1.02), fr(0.98), fr(1.0))
+        val ring = listOf(fr(0.0), fr(PI / 2), fr(PI), fr(3 * PI / 2))
+        assertTrue(SwingSolver.azimuthBalance(same) < 0.01)
+        assertTrue(SwingSolver.azimuthBalance(ring) > 0.95)
+        val rs = SwingSolver.solve(same)!!
+        assertFalse("ayni yon: sapma gozlenemez", rs.observable)
+        val rr = SwingSolver.solve(ring)!!
+        assertTrue(rr.observable)
+        assertEquals(41.0, rr.latitudeDeg, 0.01); assertEquals(29.0, rr.longitudeDeg, 0.01)
+        // pusula tabanli azimut: kameranin gercek yonu (kuzeyden doguya) geri okunur
+        val a = SwingSolver.boresightAzimuthDeg(sceneRotation(41.0, 29.0, epoch, 64.0, 0.0, 1.0), ZenithFix.upFromTilt(64.0, 0.0))
+        assertEquals(Math.toDegrees(1.0), a, 0.5)
+    }
+
+    /** Uygulamadaki akis: 8 kare (4 yon x 2 tur), bilinmeyen 0.6° sapma, farkli tutus. */
+    @Test fun fullSwing8Frames() {
+        val rng = Random(1357)
+        for (hand in listOf(0.1, 0.03)) {
+            val errs = ArrayList<Double>(); val est = ArrayList<Double>()
+            repeat(30) {
+                val lat = Math.toDegrees(asin(rng.nextDouble() * 2 - 1)); val lon = rng.nextDouble() * 360 - 180
+                val day0 = 1_795_000_000_000L + (rng.nextDouble() * 365 * 86400e3).toLong()
+                val epoch0 = day0 - day0 % 86_400_000L + ((22.0 + rng.nextDouble() * 3 - lon / 15.0) * 3_600_000).toLong()
+                val offDir = unit(doubleArrayOf(rng.nextGaussian(), rng.nextGaussian(), rng.nextGaussian()))
+                val offset = DoubleArray(3) { offDir[it] * Math.toRadians(0.6) }
+                val az0 = rng.nextDouble() * 2 * PI; val pitch0 = 60.0 + rng.nextDouble() * 10
+                val frames = ArrayList<SwingFrame>()
+                for (k in 0 until 8) {
+                    val epoch = epoch0 + k * 15_000L
+                    val pitch = pitch0 + (rng.nextDouble() - .5) * 4; val roll = (rng.nextDouble() - .5) * 3
+                    val r = sceneRotation(lat, lon, epoch, pitch, roll, az0 + k * PI / 2 + (rng.nextDouble() - .5) * 0.5)
+                    val stars = synth(rng, r, 66.0, 4000, 3000, zenith = ZenithFix.zenithIcrs(lat, lon, epoch))
+                    val up = ZenithFix.upFromTilt(pitch, roll)
+                    val meas = unit(DoubleArray(3) { up[it] + offset[it] + Math.toRadians(hand) * rng.nextGaussian() })
+                    val plate = solver.solve(stars, 4000, 3000, 66.0) ?: continue
+                    frames.add(SwingFrame(solver.correctForRefraction(stars, 4000, 3000, plate, meas).celFromCam, meas, epoch, hand))
+                }
+                val res = SwingSolver.solve(frames) ?: return@repeat
+                errs.add(ZenithFix.greatCircleKm(lat, lon, res.latitudeDeg, res.longitudeDeg))
+                est.add(ZenithLocator.estimateErrorKm(res.latitudeDeg, res.tiltSigmaDeg, 2.0, 0.02).first)
+            }
+            errs.sort(); est.sort()
+            fun q(l: List<Double>, p: Double) = l[(p * l.size).toInt().coerceAtMost(l.size - 1)]
+            println("TAM AKIS 8 kare (sapma 0.6° bilinmiyor, el %.2f°): medyan %.1f km, %%68 %.1f, %%95 %.1f, maks %.1f | uygulamanin tahmini %%68 medyan %.1f km".format(hand, q(errs, .5), q(errs, .68), q(errs, .95), errs.last(), q(est, .5)))
+        }
+    }
 }

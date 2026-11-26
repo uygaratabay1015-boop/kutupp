@@ -261,7 +261,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
             android:checked="true"
-            android:text="Seri cekim: 5 kare ortalamasi (daha dusuk hata)"
+            android:text="Seri cekim: 8 kare, 4 yon (sapmayi kendisi giderir)"
             android:textColor="@color/light_gray"
             android:textSize="11sp"
             android:fontFamily="monospace" />
