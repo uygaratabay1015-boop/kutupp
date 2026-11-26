@@ -515,10 +515,27 @@ class MainActivity : AppCompatActivity() {
     private fun restoreAutoExposure() {
         if (nightOptions == null) return
         try {
-            camera?.let { Camera2CameraControl.from(it.cameraControl).clearCaptureRequestOptions() }
+            camera?.let {
+                val c2 = Camera2CameraControl.from(it.cameraControl)
+                c2.clearCaptureRequestOptions()
+                // Bazi telefonlarda clear yetmiyor: otomatik pozlamayi acikca yaz.
+                c2.setCaptureRequestOptions(
+                    CaptureRequestOptions.Builder()
+                        .setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                        .setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                        .build()
+                )
+            }
         } catch (e: Exception) {
             Log.w(TAG, "Otomatik pozlamaya donulemedi", e)
         }
+    }
+
+    /** Manuel pozlama sonrasi onizleme beyaz kalmasin diye kamera oturumunu temiz yeniden kurar. */
+    private fun resetCameraSession() {
+        if (nightOptions == null) return
+        restoreAutoExposure()
+        aimHandler.postDelayed({ if (!isDestroyed && !burstActive) startCamera() }, 400L)
     }
 
     private fun updateVerticalFovFromCamera(cam: Camera?) {
@@ -711,6 +728,7 @@ class MainActivity : AppCompatActivity() {
                                     onBurstFrameCaptured()
                                 } else {
                                     setProcessingState(false)
+                                    resetCameraSession()
                                     Toast.makeText(this@MainActivity, "Foto cekildi. HESAPLA'ya bas.", Toast.LENGTH_SHORT).show()
                                 }
                             }
@@ -730,7 +748,7 @@ class MainActivity : AppCompatActivity() {
                     restoreAutoExposure()
                     Log.e(TAG, "Fotograf cekme hatasi", exc)
                     Toast.makeText(this@MainActivity, "Fotograf cekilemedi", Toast.LENGTH_SHORT).show()
-                    if (burstActive) burstFrameDone(null) else setProcessingState(false)
+                    if (burstActive) burstFrameDone(null) else { setProcessingState(false); resetCameraSession() }
                 }
             }
         )
@@ -990,6 +1008,7 @@ class MainActivity : AppCompatActivity() {
         burstWaiting = false
         captureButton.text = "CEK"
         setProcessingState(false)
+        resetCameraSession()
         val res = SwingSolver.solve(burstFrames)
         if (res == null) {
             resultTextView.text = "Seri cekim: hicbir karede yildiz cozumu yok ($burstLastNote)"
