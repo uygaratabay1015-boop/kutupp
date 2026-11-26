@@ -93,6 +93,8 @@ class MainActivity : AppCompatActivity() {
         private const val MAX_DECODE_PX = 2600
         private const val MIN_USEFUL_EXPOSURE_NS = 500_000_000L
         private const val BURST_MAX_SPREAD_DEG = 0.6f
+        private const val TRIPOD_SPREAD_DEG = 0.04f
+        private const val SENSOR_WARMUP_MS = 120_000L
         const val SHAKY_TILT_SPREAD_DEG = 1.0f
         private const val REQUEST_CODE_PERMISSIONS = 10
         private val REQUIRED_PERMISSIONS = arrayOf(Manifest.permission.CAMERA)
@@ -661,7 +663,14 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    private val appStartMs = android.os.SystemClock.elapsedRealtime()
+    private var warmupNoticeShown = false
+
     private fun takePhotoForSelection() {
+        if (!warmupNoticeShown && android.os.SystemClock.elapsedRealtime() - appStartMs < SENSOR_WARMUP_MS) {
+            warmupNoticeShown = true
+            Toast.makeText(this, "Ipucu: sensorler ilk ~2 dk isinirken kayar; daha dogru sonuc icin uygulamayi biraz acik tutup sonra cekin.", Toast.LENGTH_LONG).show()
+        }
         val localImageCapture = imageCapture
         if (localImageCapture == null) {
             Toast.makeText(this, "Kamera hazir degil", Toast.LENGTH_SHORT).show()
@@ -695,10 +704,17 @@ class MainActivity : AppCompatActivity() {
                     val expNs = nightExposureNs
                     val startNs = image.imageInfo.timestamp
                     val timestampOk = expNs > 0L && cameraTimestampRealtime && nowNs - startNs in 0L..30_000_000_000L
-                    val tilt: CameraTilt?
+                    var tilt: CameraTilt?
                     val captureEpochMs: Long
                     if (timestampOk) {
                         tilt = tiltSensor.estimateForWindow(localImageCapture.targetRotation, startNs, startNs + expNs)
+                        // Tripod/sabit: telefon pozlamadan once de hareketsizse ayni yonun ortalamasini uzat (gurultu ~1/sqrt(N)).
+                        if (tilt != null && tilt.spreadDeg < TRIPOD_SPREAD_DEG) {
+                            for (extraSec in doubleArrayOf(10.0, 6.0, 3.0)) {
+                                val t2 = tiltSensor.estimateForWindow(localImageCapture.targetRotation, startNs - (extraSec * 1e9).toLong(), nowNs)
+                                if (t2 != null && t2.spreadDeg <= TRIPOD_SPREAD_DEG * 1.5f) { tilt = t2; break }
+                            }
+                        }
                         captureEpochMs = System.currentTimeMillis() - (nowNs - startNs) / 1_000_000L + expNs / 2_000_000L
                     } else {
                         tilt = tiltSensor.estimateForCapture(localImageCapture.targetRotation, Math.max(1.0, expNs / 1e9))
