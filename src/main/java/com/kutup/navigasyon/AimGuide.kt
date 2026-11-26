@@ -12,7 +12,8 @@ data class AimState(
     /** 0..1: hepsi dogruyken sabit kalma ilerlemesi. */
     val holdProgress: Float,
     val ready: Boolean,
-    val message: String
+    val message: String,
+    val spreadDeg: Float = 0f
 )
 
 /**
@@ -25,11 +26,12 @@ data class AimState(
  * asil olan titremesizlik ([steadySpreadDeg]).
  */
 class AimGuide(
-    minPitchDeg: Float = 55f,
-    maxPitchDeg: Float = 75f,
-    val rollTolDeg: Float = 3f,
-    val steadySpreadDeg: Float = 0.1f,
-    val holdMs: Long = 2000L
+    minPitchDeg: Float = 50f,
+    maxPitchDeg: Float = 80f,
+    val rollTolDeg: Float = 6f,
+    val steadySpreadDeg: Float = 0.35f,
+    val holdMs: Long = 1000L,
+    val graceMs: Long = 400L
 ) {
     var minPitchDeg: Float = minPitchDeg
         private set
@@ -38,27 +40,34 @@ class AimGuide(
 
     /** Uzun kenar gorus acisina (derece) gore hedef araligi ayarlar. */
     fun setFov(longSideFovDeg: Float) {
-        val lo = (longSideFovDeg / 2f + EDGE_MARGIN_DEG).coerceIn(50f, 70f)
+        val lo = (longSideFovDeg / 2f + EDGE_MARGIN_DEG).coerceIn(45f, 65f)
         minPitchDeg = lo
-        maxPitchDeg = (lo + 20f).coerceAtMost(80f)
+        maxPitchDeg = 85f
     }
 
     private var okSinceMs: Long = -1L
+    private var lastOkMs: Long = -1L
 
-    fun reset() { okSinceMs = -1L }
+    fun reset() { okSinceMs = -1L; lastOkMs = -1L }
 
     companion object { const val EDGE_MARGIN_DEG = 22f }
 
     fun evaluate(tilt: CameraTilt?, nowMs: Long): AimState {
         if (tilt == null) {
-            okSinceMs = -1L
+            okSinceMs = -1L; lastOkMs = -1L
             return AimState(0f, 0f, false, false, false, 0f, false, "Sensorler hazirlaniyor… telefonu yavasca tutun")
         }
         val pitchOk = tilt.pitchDeg in minPitchDeg..maxPitchDeg
         val rollOk = abs(tilt.rollDeg) <= rollTolDeg
         val steadyOk = tilt.spreadDeg <= steadySpreadDeg
         val allOk = pitchOk && rollOk && steadyOk
-        if (allOk) { if (okSinceMs < 0) okSinceMs = nowMs } else okSinceMs = -1L
+        if (allOk) {
+            if (okSinceMs < 0) okSinceMs = nowMs
+            lastOkMs = nowMs
+        } else if (lastOkMs >= 0 && nowMs - lastOkMs > graceMs) {
+            // Kisa bir sapmada ilerleme sifirlanmaz (el dogal titremesi)
+            okSinceMs = -1L; lastOkMs = -1L
+        }
         val progress = if (okSinceMs < 0) 0f else ((nowMs - okSinceMs).toFloat() / holdMs).coerceIn(0f, 1f)
         val ready = allOk && progress >= 1f
         val message = when {
@@ -69,6 +78,6 @@ class AimGuide(
             !ready -> "Sabit tutun…"
             else -> "Hazir! Simdi cekin"
         }
-        return AimState(tilt.pitchDeg, tilt.rollDeg, pitchOk, rollOk, steadyOk, progress, ready, message)
+        return AimState(tilt.pitchDeg, tilt.rollDeg, pitchOk, rollOk, steadyOk, progress, ready, message, tilt.spreadDeg)
     }
 }

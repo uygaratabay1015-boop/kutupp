@@ -73,5 +73,7 @@ class AimGuideView @JvmOverloads constructor(
         // Mesaj
         text.textSize = 15f * d
         canvas.drawText(s.message, cx, h * 0.12f, text)
+        text.textSize = 12f * d
+        canvas.drawText("Egim %d°  Yatay %d°  Titreme %.2f°".format(s.pitchDeg.toInt(), s.rollDeg.toInt(), s.spreadDeg), cx, h * 0.12f + 22f * d, text)
     }
 }

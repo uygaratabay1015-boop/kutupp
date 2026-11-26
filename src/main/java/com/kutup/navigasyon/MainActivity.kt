@@ -127,7 +127,7 @@ class MainActivity : AppCompatActivity() {
     private val aimTick = object : Runnable {
         override fun run() {
             if (::tiltSensor.isInitialized && ::aimGuideView.isInitialized) {
-                val tilt = tiltSensor.estimateForCapture(previewView.display?.rotation ?: android.view.Surface.ROTATION_0, Math.max(0.7, nightExposureNs / 1e9))
+                val tilt = tiltSensor.estimateForCapture(previewView.display?.rotation ?: android.view.Surface.ROTATION_0, 1.0)
                 val aimState = aimGuide.evaluate(tilt, android.os.SystemClock.elapsedRealtime())
                 aimGuideView.update(aimState)
                 val nowMs = android.os.SystemClock.elapsedRealtime()
@@ -355,6 +355,13 @@ class MainActivity : AppCompatActivity() {
             }
         }
         togglePanelButton.setOnClickListener { toggleControlPanel() }
+        val advancedPanel = findViewById<View>(R.id.advancedPanel)
+        val advancedToggle = findViewById<Button>(R.id.advancedToggleButton)
+        advancedToggle.setOnClickListener {
+            val show = advancedPanel.visibility != View.VISIBLE
+            advancedPanel.visibility = if (show) View.VISIBLE else View.GONE
+            advancedToggle.text = if (show) "Gelismis ayarlar ▴" else "Gelismis ayarlar ▾"
+        }
         calculateButton.setOnClickListener { onCalculatePressed() }
         showMapButton.setOnClickListener { showEstimatedLocationOnMap() }
         modeButton.setOnClickListener {
@@ -368,7 +375,7 @@ class MainActivity : AppCompatActivity() {
     private fun toggleControlPanel() {
         val isVisible = controlPanel.visibility == View.VISIBLE
         controlPanel.visibility = if (isVisible) View.GONE else View.VISIBLE
-        togglePanelButton.text = if (isVisible) "Panel Goster" else "Panel Gizle"
+        togglePanelButton.text = if (isVisible) "Paneli Goster" else "Paneli Gizle"
     }
 
     private fun initializeModules() {
