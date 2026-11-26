@@ -33,7 +33,8 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.camera.camera2.interop.Camera2CameraInfo
-import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.Camera2CameraControl
+import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
@@ -434,6 +435,8 @@ class MainActivity : AppCompatActivity() {
     private var nightIso: Int = 0
     private var cameraTimestampRealtime = false
 
+    private var nightOptions: CaptureRequestOptions? = null
+
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
         cameraProviderFuture.addListener({
@@ -443,25 +446,18 @@ class MainActivity : AppCompatActivity() {
                 it.setSurfaceProvider(previewView.surfaceProvider)
             }
 
-            // 1) Kamera ozelliklerini (poz/ISO araligi) okumak icin once varsayilanla bagla
-            val probe = ImageCapture.Builder()
+            imageCapture = ImageCapture.Builder()
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
                 .setTargetResolution(Size(4032, 3024))
+                .setJpegQuality(100)
                 .build()
 
             try {
                 cameraProvider.unbindAll()
-                camera = cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, probe)
-                imageCapture = probe
+                camera = cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture)
                 updateVerticalFovFromCamera(camera)
-
-                // 2) Gece ayarli (manuel uzun pozlama, sonsuz odak, minimum gurultu azaltma) ImageCapture ile yeniden bagla
-                val night = camera?.let { buildNightImageCapture(it) }
-                if (night != null) {
-                    cameraProvider.unbindAll()
-                    camera = cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, night)
-                    imageCapture = night
-                }
+                // Manuel pozlama YALNIZCA cekim aninda uygulanir (onizleme otomatik kalir; yoksa gunduz/gece onizleme bozulur).
+                nightOptions = camera?.let { buildNightOptions(it) }
                 captureButton.isEnabled = true
                 updateCalculateButton()
             } catch (exc: Exception) {
@@ -473,10 +469,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Yildiz icin: yuksek cozunurluk, manuel poz (<= ~3 sn: yildiz izi ~1 piksel), orta ISO, sonsuza odak,
-     * minimum gurultu azaltma/keskinlestirme, OIS kapali. Telefon bunlari desteklemiyorsa null (varsayilan cekim).
+     * Yildiz icin cekim ayarlari: manuel poz (<= ~3 sn: yildiz izi ~1 piksel), orta ISO, sonsuza odak,
+     * minimum gurultu azaltma/keskinlestirme, OIS kapali. Telefon bunlari desteklemiyorsa null.
      */
-    private fun buildNightImageCapture(cam: Camera): ImageCapture? {
+    private fun buildNightOptions(cam: Camera): CaptureRequestOptions? {
         return try {
             val c2 = Camera2CameraInfo.from(cam.cameraInfo)
             val expRange = c2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
@@ -486,29 +482,35 @@ class MainActivity : AppCompatActivity() {
             if (expRange == null || isoRange == null) return null
             val exposure = TARGET_EXPOSURE_NS.coerceIn(expRange.lower, expRange.upper)
             val iso = TARGET_ISO.coerceIn(isoRange.lower, isoRange.upper)
-            val builder = ImageCapture.Builder()
-                .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-                .setTargetResolution(Size(4032, 3024))
-                .setJpegQuality(100)
-            val ext = Camera2Interop.Extender(builder)
-            ext.setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
-            ext.setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, exposure)
-            ext.setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, iso)
-            ext.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
-            ext.setCaptureRequestOption(CaptureRequest.LENS_FOCUS_DISTANCE, 0f)
-            ext.setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_MINIMAL)
-            ext.setCaptureRequestOption(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF)
-            ext.setCaptureRequestOption(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
             nightExposureNs = exposure
             nightIso = iso
             if (exposure < MIN_USEFUL_EXPOSURE_NS) {
                 Toast.makeText(this, "Bu telefon uzun pozlamayi desteklemiyor (en fazla %.2f sn): az yildiz gorunebilir".format(exposure / 1e9), Toast.LENGTH_LONG).show()
             }
-            builder.build()
+            CaptureRequestOptions.Builder()
+                .setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                .setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, exposure)
+                .setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, iso)
+                .setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                .setCaptureRequestOption(CaptureRequest.LENS_FOCUS_DISTANCE, 0f)
+                .setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_MINIMAL)
+                .setCaptureRequestOption(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF)
+                .setCaptureRequestOption(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
+                .build()
         } catch (e: Exception) {
             Log.w(TAG, "Gece cekim ayarlari uygulanamadi, varsayilan kullaniliyor", e)
             nightExposureNs = 0L
             null
+        }
+    }
+
+    /** Cekim bitince onizlemeyi otomatik pozlamaya geri al. */
+    private fun restoreAutoExposure() {
+        if (nightOptions == null) return
+        try {
+            camera?.let { Camera2CameraControl.from(it.cameraControl).clearCaptureRequestOptions() }
+        } catch (e: Exception) {
+            Log.w(TAG, "Otomatik pozlamaya donulemedi", e)
         }
     }
 
@@ -633,10 +635,26 @@ class MainActivity : AppCompatActivity() {
         }
 
         setProcessingState(true)
+        val opts = nightOptions
+        val cam = camera
+        if (opts != null && cam != null) {
+            try {
+                Camera2CameraControl.from(cam.cameraControl).setCaptureRequestOptions(opts)
+                    .addListener({ runTakePicture(localImageCapture) }, ContextCompat.getMainExecutor(this))
+                return
+            } catch (e: Exception) {
+                Log.w(TAG, "Manuel pozlama uygulanamadi, varsayilan cekim", e)
+            }
+        }
+        runTakePicture(localImageCapture)
+    }
+
+    private fun runTakePicture(localImageCapture: ImageCapture) {
         localImageCapture.takePicture(
             ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageCapturedCallback() {
                 override fun onCaptureSuccess(image: ImageProxy) {
+                    restoreAutoExposure()
                     // Sensor penceresi cekim anina ait: once (ana is parcacigi) hesaplanir.
                     // Pozlama penceresi (sensor zaman tabaninda) + ortasindaki gercek saat; yoksa son 1-3 sn ve "simdi".
                     val nowNs = android.os.SystemClock.elapsedRealtimeNanos()
@@ -702,6 +720,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 override fun onError(exc: ImageCaptureException) {
+                    restoreAutoExposure()
                     Log.e(TAG, "Fotograf cekme hatasi", exc)
                     Toast.makeText(this@MainActivity, "Fotograf cekilemedi", Toast.LENGTH_SHORT).show()
                     if (burstActive) burstFrameDone(null) else setProcessingState(false)
