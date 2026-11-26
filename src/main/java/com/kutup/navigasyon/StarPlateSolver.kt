@@ -332,7 +332,11 @@ class StarPlateSolver(
      * Aksi halde sabit bir kayma (~1 km) zenit yonune yansir.
      * @param upCam yaklasik zenit yonu (kamera ekseninde)
      */
-    fun correctForRefraction(stars: List<Star>, widthPx: Int, heightPx: Int, plate: PlateSolution, upCam: DoubleArray): PlateSolution {
+    fun correctForRefraction(
+        stars: List<Star>, widthPx: Int, heightPx: Int, plate: PlateSolution, upCam: DoubleArray,
+        epochMillis: Long? = null
+    ): PlateSolution {
+        val beta = epochMillis?.let { earthVelocityOverC(it) }
         val cx = widthPx / 2.0; val cy = heightPx / 2.0
         val f = (max(widthPx, heightPx) / 2.0) / tan(Math.toRadians(plate.longSideFovDeg) / 2.0)
         val obs = stars.sortedByDescending { it.brightness }.take(40).map { Obs(it.x.toDouble(), it.y.toDouble()) }
@@ -347,7 +351,8 @@ class StarPlateSolver(
                 val cv = camVec(o, cx, cy, f)
                 val (i, _) = nearestCatalog(mulVec(r, cv), Math.toRadians(0.15), 5.5f)
                 if (i < 0 || !used.add(i)) continue
-                val v = starVec(i)
+                val v0 = starVec(i)
+                val v = if (beta != null) aberrate(v0, beta) else v0
                 val sinAlt = (v[0] * z[0] + v[1] * z[1] + v[2] * z[2]).coerceIn(-1.0, 1.0)
                 val altDeg = Math.toDegrees(kotlin.math.asin(sinAlt))
                 if (altDeg < 8.0) continue
@@ -366,6 +371,27 @@ class StarPlateSolver(
         val ra = (Math.toDegrees(kotlin.math.atan2(bore[1], bore[0])) + 360.0) % 360.0
         val dec = Math.toDegrees(kotlin.math.asin(bore[2].coerceIn(-1.0, 1.0)))
         return plate.copy(celFromCam = r, boresightRaDeg = ra, boresightDecDeg = dec)
+    }
+
+    /**
+     * Yillik sapinc (aberasyon): Dunya'nin yorunge hizi (~29.8 km/s) yildiz yonlerini <=20.5" kaydirir.
+     * Gunes'in ekliptik boylamindan Dunya hiz vektoru / c (ICRS ekvatoral eksenleri).
+     */
+    private fun earthVelocityOverC(epochMillis: Long): DoubleArray {
+        val jd = epochMillis / 86_400_000.0 + 2440587.5
+        val n = jd - 2451545.0
+        val g = Math.toRadians(357.528 + 0.9856003 * n)
+        val lam = Math.toRadians(280.460 + 0.9856474 * n + 1.915 * sin(g) + 0.020 * sin(2 * g))
+        val eps = Math.toRadians(23.4393)
+        val b = 29.78 / 299_792.458
+        return doubleArrayOf(b * sin(lam), -b * cos(lam) * cos(eps), -b * cos(lam) * sin(eps))
+    }
+
+    private fun aberrate(v: DoubleArray, beta: DoubleArray): DoubleArray {
+        val d = v[0] * beta[0] + v[1] * beta[1] + v[2] * beta[2]
+        val x = v[0] + beta[0] - d * v[0]; val y = v[1] + beta[1] - d * v[1]; val z = v[2] + beta[2] - d * v[2]
+        val n = sqrt(x * x + y * y + z * z)
+        return doubleArrayOf(x / n, y / n, z / n)
     }
 
     private fun starVec(i: Int) = doubleArrayOf(catalog.vec[3 * i], catalog.vec[3 * i + 1], catalog.vec[3 * i + 2])

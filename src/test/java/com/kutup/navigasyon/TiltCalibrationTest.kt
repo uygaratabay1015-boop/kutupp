@@ -32,12 +32,22 @@ class TiltCalibrationTest {
         return Array(3) { i -> doubleArrayOf(xi[i], yi[i], zi[i]) }
     }
 
-    private fun synth(rng: Random, r: Array<DoubleArray>, fovDeg: Double, w: Int, h: Int, zenith: DoubleArray? = null): List<Star> {
+    private fun synth(rng: Random, r: Array<DoubleArray>, fovDeg: Double, w: Int, h: Int, zenith: DoubleArray? = null, epoch: Long? = null): List<Star> {
         val f = (max(w, h) / 2.0) / tan(Math.toRadians(fovDeg) / 2)
         val out = ArrayList<Star>()
         for (i in 0 until catalog.size) {
             if (catalog.mag[i] > 4.6f || rng.nextDouble() < 0.25) continue
             var v = doubleArrayOf(catalog.vec[3 * i], catalog.vec[3 * i + 1], catalog.vec[3 * i + 2])
+            if (epoch != null) { // yillik sapinc (bagimsiz uygulama: tam Earth hiz modeli)
+                val jd = epoch / 86_400_000.0 + 2440587.5; val n = jd - 2451545.0
+                val g = Math.toRadians(357.528 + 0.9856003 * n)
+                val lam = Math.toRadians(280.460 + 0.9856474 * n + 1.915 * sin(g) + 0.020 * sin(2 * g)); val eps = Math.toRadians(23.4393)
+                val b = 29.78 / 299_792.458
+                val be = doubleArrayOf(b * sin(lam), -b * cos(lam) * cos(eps), -b * cos(lam) * sin(eps))
+                val d = v[0] * be[0] + v[1] * be[1] + v[2] * be[2]
+                val t = DoubleArray(3) { v[it] + be[it] - d * v[it] }; val tn = sqrt(t.sumOf { it * it })
+                v = DoubleArray(3) { t[it] / tn }
+            }
             if (zenith != null) { // gercek atmosfer kirilmasi: gorunen konum zenite dogru kayar
                 val sa = (v[0] * zenith[0] + v[1] * zenith[1] + v[2] * zenith[2]).coerceIn(-1.0, 1.0)
                 val alt = Math.toDegrees(asin(sa))
@@ -284,5 +294,29 @@ class TiltCalibrationTest {
             fun q(l: List<Double>, p: Double) = l[(p * l.size).toInt().coerceAtMost(l.size - 1)]
             println("TAM AKIS 8 kare (sapma 0.6° bilinmiyor, el %.2f°): medyan %.1f km, %%68 %.1f, %%95 %.1f, maks %.1f | uygulamanin tahmini %%68 medyan %.1f km".format(hand, q(errs, .5), q(errs, .68), q(errs, .95), errs.last(), q(est, .5)))
         }
+    }
+
+    /** Yillik sapinc (<=20.5") simule edilir; epoch'lu duzeltme ac/kapa. */
+    @Test fun aberrationCorrectionHelps() {
+        val rng = Random(404)
+        val off = ArrayList<Double>(); val on = ArrayList<Double>()
+        repeat(60) {
+            val lat = Math.toDegrees(asin(rng.nextDouble() * 2 - 1)); val lon = rng.nextDouble() * 360 - 180
+            val day0 = 1_795_000_000_000L + (rng.nextDouble() * 365 * 86400e3).toLong()
+            val epoch = day0 - day0 % 86_400_000L + ((22.0 + rng.nextDouble() * 4 - lon / 15.0) * 3_600_000).toLong()
+            val pitch = 55.0 + rng.nextDouble() * 20; val roll = (rng.nextDouble() - .5) * 4
+            val r = sceneRotation(lat, lon, epoch, pitch, roll, rng.nextDouble() * 2 * PI)
+            val stars = synth(rng, r, 66.0, 4000, 3000, zenith = ZenithFix.zenithIcrs(lat, lon, epoch), epoch = epoch)
+            val up = ZenithFix.upFromTilt(pitch, roll)
+            val plate = solver.solve(stars, 4000, 3000, 66.0) ?: return@repeat
+            for (flag in listOf(false, true)) {
+                val p2 = solver.correctForRefraction(stars, 4000, 3000, plate, up, if (flag) epoch else null)
+                val f = ZenithFix.solvePosition(p2.celFromCam, up, epoch)
+                (if (flag) on else off).add(ZenithFix.greatCircleKm(lat, lon, f.latitudeDeg, f.longitudeDeg))
+            }
+        }
+        off.sort(); on.sort()
+        println("SAPINC: duzeltmesiz medyan %.2f km (p95 %.2f) | duzeltmeli medyan %.2f km (p95 %.2f) n=%d".format(off[off.size / 2], off[(off.size * .95).toInt().coerceAtMost(off.size - 1)], on[on.size / 2], on[(on.size * .95).toInt().coerceAtMost(on.size - 1)], on.size))
+        assertTrue(on[on.size / 2] < off[off.size / 2])
     }
 }

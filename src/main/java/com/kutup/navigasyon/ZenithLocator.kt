@@ -49,7 +49,7 @@ class ZenithLocator(private val solver: StarPlateSolver) {
             ?: return ZenithOutcome(false, message = "Yildizlar katalogla eslestirilemedi (bulut/isik kirliligi/yanlis gorus acisi?)")
         val alt = ZenithFix.boresightAltitudeDeg(upCam)
         if (alt < 5.0) return ZenithOutcome(false, message = "Egim verisi tutarsiz (kamera yuksekligi ${"%.0f".format(alt)}°)", plate = plate)
-        val plateFinal = if (correctRefraction) solver.correctForRefraction(stars, widthPx, heightPx, plate, upCam) else plate
+        val plateFinal = if (correctRefraction) solver.correctForRefraction(stars, widthPx, heightPx, plate, upCam, epochMillis) else plate
         val fix = ZenithFix.solvePosition(plateFinal.celFromCam, upCam, epochMillis)
         val (e68, e95) = estimateErrorKm(fix.latitudeDeg, tiltSigmaDeg, timeSigmaSec, plate.rmsDeg)
         return ZenithOutcome(true, fix.latitudeDeg, fix.longitudeDeg, e68, e95, "Zenit yontemi", plateFinal, alt)
@@ -69,7 +69,7 @@ class ZenithLocator(private val solver: StarPlateSolver) {
         val plate0 = solvePlate(stars, widthPx, heightPx, longSideFovDeg, maxSolveMillis) ?: return null
         val z = ZenithFix.zenithIcrs(knownLatDeg, knownLonDeg, epochMillis)
         fun camUp(r: Array<DoubleArray>) = DoubleArray(3) { k -> r[0][k] * z[0] + r[1][k] * z[1] + r[2][k] * z[2] } // cam = R^T cel
-        val plate = solver.correctForRefraction(stars, widthPx, heightPx, plate0, camUp(plate0.celFromCam))
+        val plate = solver.correctForRefraction(stars, widthPx, heightPx, plate0, camUp(plate0.celFromCam), epochMillis)
         return camUp(plate.celFromCam)
     }
 
