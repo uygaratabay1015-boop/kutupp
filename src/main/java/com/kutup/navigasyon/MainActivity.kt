@@ -252,6 +252,15 @@ class MainActivity : AppCompatActivity() {
         compass.startListening()
         tiltSensor.startListening()
         updateModeText()
+        warnIfClockNotAutomatic()
+    }
+
+    /** Konum saate cok baglidir (1 sn ~ 0,35 km): otomatik (ag) saat kapaliysa uyar. */
+    private fun warnIfClockNotAutomatic() {
+        try {
+            val auto = android.provider.Settings.Global.getInt(contentResolver, android.provider.Settings.Global.AUTO_TIME, 1) == 1
+            if (!auto) Toast.makeText(this, "Uyari: Ayarlar > Tarih ve saat > Otomatik tarih ve saat'i acin. Saat hatasi konum hatasi demektir (1 sn ~ 0,35 km).", Toast.LENGTH_LONG).show()
+        } catch (e: Exception) { Log.w(TAG, "Saat ayari okunamadi", e) }
     }
 
     // Sensorler arka planda calismaya devam edip bataryayi tuketmesin diye
@@ -645,7 +654,7 @@ class MainActivity : AppCompatActivity() {
                 "2) Beyaz cizgiler ile hareketli cizgiyi ust uste getirin (telefon yana yatik olmasin).\n" +
                 "3) Mumkunse tripod kullanin veya telefonu bir yere dayayin; elde tutarken kolunuzu govdenize yaslayin.\n" +
                 "4) Halka dolup 'Hazir!' yazinca cekin. Her kare ~3 sn pozlanir: pozlama bitene kadar telefonu hic oynatmayin, ekrana dokunmayin.\n" +
-                "5) Seri cekimde (8 kare) her karede telefonu AYNI egimle ~90° yana dondurun: boylece sensor sapmasi kendiliginden giderilir.\n" +
+                "5) Seri cekimde (12 kare) her karede telefonu AYNI egimle ~90° yana dondurun: boylece sensor sapmasi kendiliginden giderilir.\n" +
                 "6) Saatin ve saat diliminin dogru oldugundan emin olun.\n\n" +
                 "Not: 1° egim hatasi yaklasik 111 km konum hatasi demektir; sabit tutmak cok onemli."
             )
@@ -943,7 +952,7 @@ class MainActivity : AppCompatActivity() {
     private var burstActive = false
     private var burstWaiting = false
     private var burstIndex = 0
-    private val burstTotal = 8
+    private val burstTotal = 12
     private val burstFrames = ArrayList<SwingFrame>()
     private var burstSystematicSigma = 0.5
     private var burstTimeSigma = 2.0
@@ -957,7 +966,7 @@ class MainActivity : AppCompatActivity() {
         return if (d > 180.0) 360.0 - d else d
     }
 
-    /** CEK / otomatik cekim girisi: seri mod aciksa 8 kare (4 yon), degilse tek kare. */
+    /** CEK / otomatik cekim girisi: seri mod aciksa 12 kare (4 yon), degilse tek kare. */
     private fun startCaptureSequence() {
         if (burstActive) { requestFinishBurst(); return }
         if (::burstSwitch.isInitialized && burstSwitch.isChecked && zenithLocator != null) {

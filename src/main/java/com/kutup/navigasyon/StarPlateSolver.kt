@@ -47,7 +47,9 @@ data class PlateSolution(
     val usedStars: Int,
     val rmsDeg: Double,
     val boresightRaDeg: Double,
-    val boresightDecDeg: Double
+    val boresightDecDeg: Double,
+    /** Radyal distorsiyon katsayisi (0 = kullanilmadi). */
+    val k1: Double = 0.0
 )
 
 /**
@@ -105,8 +107,9 @@ class StarPlateSolver(
 
     private class Obs(val x: Double, val y: Double)
 
-    private fun camVec(o: Obs, cx: Double, cy: Double, f: Double): DoubleArray {
-        val a = (o.x - cx) / f; val b = (o.y - cy) / f
+    private fun camVec(o: Obs, cx: Double, cy: Double, f: Double, k1: Double = 0.0): DoubleArray {
+        var a = (o.x - cx) / f; var b = (o.y - cy) / f
+        if (k1 != 0.0) { val sc = 1.0 + k1 * (a * a + b * b); a *= sc; b *= sc }   // radyal distorsiyon (tek katsayi)
         val n = sqrt(a * a + b * b + 1.0)
         return doubleArrayOf(a / n, b / n, 1.0 / n)
     }
@@ -205,26 +208,27 @@ class StarPlateSolver(
         return lo
     }
 
-    private class Fit(val r: Array<DoubleArray>, val f: Double, val matches: Int, val rmsRad: Double)
+    private class Fit(val r: Array<DoubleArray>, val f: Double, val matches: Int, val rmsRad: Double, val k1: Double = 0.0)
 
     /**
      * Baslangic (R, f) ile eslestir -> donusum + odak rafine et. Tolerans azalir.
      */
-    private fun refine(obs: List<Obs>, cx: Double, cy: Double, r0: Array<DoubleArray>, f0: Double, maxMag: Float): Fit? {
-        var r = r0; var f = f0
+    private fun refine(obs: List<Obs>, cx: Double, cy: Double, r0: Array<DoubleArray>, f0: Double, maxMag: Float,
+                       k1Init: Double = 0.0, fitK: Boolean = true): Fit? {
+        var r = r0; var f = f0; var k1 = k1Init
         val tolsDeg = doubleArrayOf(0.4, 0.25, 0.15, 0.1)
         for (tol in tolsDeg) {
             val used = HashSet<Int>()
             // eslesmeleri sabit tut, odak + donusumu birlikte ara
             val matchedObs = ArrayList<Obs>(); val matchedCel = ArrayList<DoubleArray>()
             for (o in obs) {
-                val w = mulVec(r, camVec(o, cx, cy, f))
+                val w = mulVec(r, camVec(o, cx, cy, f, k1))
                 val (i, _) = nearestCatalog(w, Math.toRadians(tol), maxMag)
                 if (i >= 0 && used.add(i)) { matchedObs.add(o); matchedCel.add(doubleArrayOf(catalog.vec[3 * i], catalog.vec[3 * i + 1], catalog.vec[3 * i + 2])) }
             }
             if (matchedObs.size < 4) return null
-            fun cost(ff: Double): Pair<Double, Array<DoubleArray>> {
-                val cams = matchedObs.map { camVec(it, cx, cy, ff) }
+            fun cost(ff: Double, kk: Double = k1): Pair<Double, Array<DoubleArray>> {
+                val cams = matchedObs.map { camVec(it, cx, cy, ff, kk) }
                 val rr = fitRotation(cams, matchedCel)
                 var sum = 0.0
                 for (k in cams.indices) { val e = angleBetween(mulVec(rr, cams[k]), matchedCel[k]); sum += e * e }
@@ -239,18 +243,43 @@ class StarPlateSolver(
                 else { lo = m1; m1 = m2; c1 = c2; m2 = lo + gr * (hi - lo); c2 = cost(m2).first }
             }
             f = 0.5 * (lo + hi)
+            // Son iki (siki) turda tek katsayili distorsiyonu da kestir; yalnizca belirgin iyilesme varsa kullan.
+            if (fitK && matchedObs.size >= 10) {
+                val base = cost(f, 0.0).first
+                var klo = -0.08; var khi = 0.08
+                var n1 = khi - gr * (khi - klo); var n2 = klo + gr * (khi - klo)
+                var d1 = cost(f, n1).first; var d2 = cost(f, n2).first
+                repeat(24) {
+                    if (d1 < d2) { khi = n2; n2 = n1; d2 = d1; n1 = khi - gr * (khi - klo); d1 = cost(f, n1).first }
+                    else { klo = n1; n1 = n2; d1 = d2; n2 = klo + gr * (khi - klo); d2 = cost(f, n2).first }
+                }
+                val kBest = 0.5 * (klo + khi)
+                val kCost = cost(f, kBest).first
+                if (kCost < 0.85 * base && abs(kBest) > 1e-4) {
+                    k1 = kBest
+                    // f'yi yeni k1 ile bir kez daha incelt
+                    var l2 = f * 0.985; var h2 = f * 1.015
+                    var p1 = h2 - gr * (h2 - l2); var p2 = l2 + gr * (h2 - l2)
+                    var e1 = cost(p1).first; var e2 = cost(p2).first
+                    repeat(24) {
+                        if (e1 < e2) { h2 = p2; p2 = p1; e2 = e1; p1 = h2 - gr * (h2 - l2); e1 = cost(p1).first }
+                        else { l2 = p1; p1 = p2; e1 = e2; p2 = l2 + gr * (h2 - l2); e2 = cost(p2).first }
+                    }
+                    f = 0.5 * (l2 + h2)
+                } else k1 = k1Init
+            }
             val rr = cost(f).second
             r = rr
         }
         // son tolerans (0.1 derece) ile nihai eslesme sayisi
         var inl = 0; val used = HashSet<Int>(); var sum = 0.0
         for (o in obs) {
-            val w = mulVec(r, camVec(o, cx, cy, f))
+            val w = mulVec(r, camVec(o, cx, cy, f, k1))
             val (i, d) = nearestCatalog(w, Math.toRadians(0.12), maxMag)
             if (i >= 0 && used.add(i)) { inl++; sum += d * d }
         }
         if (inl < 4) return null
-        return Fit(r, f, inl, sqrt(sum / inl))
+        return Fit(r, f, inl, sqrt(sum / inl), k1)
     }
 
     /**
@@ -293,7 +322,7 @@ class StarPlateSolver(
                     val iStar = patIdx[pi]; val jStar = nbrIdx[pi][k]
                     k++
                     tested++
-                    if ((tested and 255) == 0 && System.nanoTime() > deadline) return finalize(best, obs.size, cx, cy)
+                    if ((tested and 255) == 0 && System.nanoTime() > deadline) return finalize(best, obs, cx, cy, maxMagForVerify)
                     val f = focalFromPair(a, b, cx, cy, seps[k - 1], f0) ?: continue
                     if (abs(f / f0 - 1.0) > 0.07) continue
                     // ucuncu yildiz: gozlenen (a,c),(b,c) acilari katalogdaki bir k yildizi ile uyusmali
@@ -317,13 +346,13 @@ class StarPlateSolver(
                     if (fit.matches >= minMatches && fit.rmsRad < Math.toRadians(0.08)) {
                         if (best == null || fit.matches > best!!.matches ||
                             (fit.matches == best!!.matches && fit.rmsRad < best!!.rmsRad)) best = fit
-                        if (fit.matches >= minMatches + 2) return finalize(best, obs.size, cx, cy)
+                        if (fit.matches >= minMatches + 2) return finalize(best, obs, cx, cy, maxMagForVerify)
                     }
                 }
             }
-            if (best != null) return finalize(best, obs.size, cx, cy)
+            if (best != null) return finalize(best, obs, cx, cy, maxMagForVerify)
         }
-        return finalize(best, obs.size, cx, cy)
+        return finalize(best, obs, cx, cy, maxMagForVerify)
     }
 
     /**
@@ -348,7 +377,7 @@ class StarPlateSolver(
             val used = HashSet<Int>()
             val cams = ArrayList<DoubleArray>(); val apparent = ArrayList<DoubleArray>()
             for (o in obs) {
-                val cv = camVec(o, cx, cy, f)
+                val cv = camVec(o, cx, cy, f, plate.k1)
                 val (i, _) = nearestCatalog(mulVec(r, cv), Math.toRadians(0.15), 6.0f)
                 if (i < 0 || !used.add(i)) continue
                 val v0 = starVec(i)
@@ -415,14 +444,33 @@ class StarPlateSolver(
         return null
     }
 
-    private fun finalize(best: Fit?, used: Int, cx: Double, cy: Double): PlateSolution? {
-        best ?: return null
+    /** Cozumden sonra distorsiyon taramasi: k1 izgarasinda eslesen yildiz sayisini enyukselten degeri sec. */
+    private fun polishDistortion(fit: Fit, obs: List<Obs>, cx: Double, cy: Double, maxMag: Float): Fit {
+        var best = fit
+        var k = -0.08
+        while (k <= 0.0801) {
+            if (abs(k) > 1e-9) {
+                val cand = refine(obs, cx, cy, fit.r, fit.f, maxMag, k1Init = k, fitK = false)
+                if (cand != null && (cand.matches > best.matches || (cand.matches == best.matches && cand.rmsRad < best.rmsRad * 0.85))) best = cand
+            }
+            k += 0.01
+        }
+        if (best === fit) return fit
+        // ince ayar: secilen k1 etrafinda serbest k1 ile yeniden rafine
+        val fin = refine(obs, cx, cy, best.r, best.f, maxMag, k1Init = best.k1, fitK = true)
+        return if (fin != null && fin.matches >= best.matches) fin else best
+    }
+
+    private fun finalize(best0: Fit?, obs: List<Obs>, cx: Double, cy: Double, maxMag: Float): PlateSolution? {
+        best0 ?: return null
+        val used = obs.size
+        val best = polishDistortion(best0, obs, cx, cy, maxMag)
         val r = best.r
         val bore = mulVec(r, doubleArrayOf(0.0, 0.0, 1.0))
         val ra = (Math.toDegrees(kotlin.math.atan2(bore[1], bore[0])) + 360.0) % 360.0
         val dec = Math.toDegrees(kotlin.math.asin(bore[2].coerceIn(-1.0, 1.0)))
         val longPx = 2.0 * max(cx, cy)
         val fov = Math.toDegrees(2.0 * atan(longPx / 2.0 / best.f))
-        return PlateSolution(r, fov, best.matches, used, Math.toDegrees(best.rmsRad), ra, dec)
+        return PlateSolution(r, fov, best.matches, used, Math.toDegrees(best.rmsRad), ra, dec, best.k1)
     }
 }

@@ -107,12 +107,28 @@ class StarDetector {
                 }
             }
             if (!tooClose) {
-                filtered.add(candidate)
+                filtered.add(subPixel(gray, width, height, candidate, integral))
                 if (filtered.size >= 400) break
             }
         }
 
         return filtered
+    }
+
+    /** Yildiz merkezini 5x5 pencerede arka plan cikarilmis agirlikli ortalamayla piksel altina tasi. */
+    private fun subPixel(gray: IntArray, width: Int, height: Int, s: Star, integral: LongArray): Star {
+        val cx = s.x.toInt(); val cy = s.y.toInt()
+        if (cx < 3 || cy < 3 || cx >= width - 3 || cy >= height - 3) return s
+        val x0 = maxOf(0, cx - 6); val x1 = minOf(width - 1, cx + 6)
+        val y0 = maxOf(0, cy - 6); val y1 = minOf(height - 1, cy + 6)
+        val bg = sumRect(integral, width, x0, y0, x1, y1).toDouble() / ((x1 - x0 + 1) * (y1 - y0 + 1))
+        var sw = 0.0; var sx = 0.0; var sy = 0.0
+        for (dy in -2..2) for (dx in -2..2) {
+            val w = gray[(cy + dy) * width + cx + dx] - bg
+            if (w > 0) { sw += w; sx += w * dx; sy += w * dy }
+        }
+        if (sw <= 0.0) return s
+        return Star((cx + sx / sw).toFloat(), (cy + sy / sw).toFloat(), s.brightness)
     }
 
     private fun sumRect(

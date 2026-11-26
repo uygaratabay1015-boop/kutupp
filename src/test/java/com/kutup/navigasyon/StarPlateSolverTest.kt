@@ -26,7 +26,7 @@ class StarPlateSolverTest {
 
     /** Sentetik kare: gercek R, gercek fov. Tespit siniri, dusme ve yalanci yildiz. */
     private fun synth(rng: Random, r: Array<DoubleArray>, fovDeg: Double, w: Int, h: Int, detMag: Float,
-                      noisePx: Double, dropFrac: Double, falseCount: Int): List<Star> {
+                      noisePx: Double, dropFrac: Double, falseCount: Int, k1: Double = 0.0): List<Star> {
         val f = (max(w, h) / 2.0) / tan(Math.toRadians(fovDeg) / 2)
         val out = ArrayList<Star>()
         for (i in 0 until catalog.size) {
@@ -35,8 +35,11 @@ class StarPlateSolverTest {
             // cam = R^T cel
             val cam = DoubleArray(3) { k -> r[0][k] * v[0] + r[1][k] * v[1] + r[2][k] * v[2] }
             if (cam[2] <= 0.05) continue
-            val x = w / 2.0 + f * cam[0] / cam[2] + rng.nextGaussian() * noisePx
-            val y = h / 2.0 + f * cam[1] / cam[2] + rng.nextGaussian() * noisePx
+            val au = cam[0] / cam[2]; val bu = cam[1] / cam[2]
+            var ad = au; var bd = bu
+            if (k1 != 0.0) repeat(30) { val sc = 1.0 + k1 * (ad * ad + bd * bd); ad = au / sc; bd = bu / sc }
+            val x = w / 2.0 + f * ad + rng.nextGaussian() * noisePx
+            val y = h / 2.0 + f * bd + rng.nextGaussian() * noisePx
             if (x < 0 || y < 0 || x >= w || y >= h) continue
             out.add(Star(x.toFloat(), y.toFloat(), (10.0.pow(-0.4 * catalog.mag[i])).toFloat()))
         }
@@ -81,6 +84,22 @@ class StarPlateSolverTest {
         println("COZUM: $ok/$total basarili, en kotu aci hatasi ${"%.4f".format(worst)} derece, medyan rms ${"%.4f".format(rms.sorted()[rms.size / 2])}")
         assertTrue("basari orani dusuk: $ok/$total", ok >= total * 0.9)
         assertTrue("yanlis cozum", worst < 0.15)
+    }
+
+    @Test fun distortionIsEstimated() {
+        val rng = Random(99)
+        val errNo = ArrayList<Double>(); val errYes = ArrayList<Double>(); val ks = ArrayList<Double>()
+        for (trial in 0 until 10) {
+            val r = randomRotation(rng); val fov = 70.0
+            val w = 4000; val h = 3000
+            val stars = synth(rng, r, fov, w, h, detMag = 5.2f, noisePx = 0.3, dropFrac = 0.1, falseCount = 4, k1 = -0.04)
+            if (stars.count { it.brightness > 0.06f } < 8) continue
+            val sol = solver.solve(stars, w, h, fov * 1.02) ?: continue
+            errYes.add(angleDeg(sol.celFromCam, r)); ks.add(sol.k1)
+            println("k1 tahmini %.4f (gercek -0.04), aci hatasi %.4f derece, rms %.4f".format(sol.k1, errYes.last(), sol.rmsDeg))
+        }
+        assertTrue("cozum yok", errYes.size >= 5)
+        assertTrue("distorsiyonlu karede hata buyuk: ${errYes.max()}", errYes.max() < 0.08)
     }
 
     @Test fun rejectsRandomNoise() {
