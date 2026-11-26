@@ -92,7 +92,8 @@ class MainActivity : AppCompatActivity() {
         private const val TARGET_ISO = 1600
         private const val MAX_DECODE_PX = 2600
         private const val MIN_USEFUL_EXPOSURE_NS = 500_000_000L
-        private const val SHAKY_TILT_SPREAD_DEG = 1.0f
+        private const val BURST_MAX_SPREAD_DEG = 0.6f
+        const val SHAKY_TILT_SPREAD_DEG = 1.0f
         private const val REQUEST_CODE_PERMISSIONS = 10
         private val REQUIRED_PERMISSIONS = arrayOf(Manifest.permission.CAMERA)
     }
@@ -277,6 +278,7 @@ class MainActivity : AppCompatActivity() {
         compass.stopListening()
         if (::tiltSensor.isInitialized) tiltSensor.stopListening()
         cameraExecutor.shutdown()
+        solveExecutor.shutdown()
     }
 
     private fun initializeUI() {
@@ -767,7 +769,7 @@ class MainActivity : AppCompatActivity() {
         displayRotationDeg: Int = 0,
         upMeasured: DoubleArray? = null
     ) {
-        selectedBitmap?.recycle()
+        if (!burstActive) selectedBitmap?.recycle()
         selectedBitmap = bitmap
         selectedSource = source
         selectedCameraPitchDeg = capturePitchDeg ?: compass.getPitchDegrees()
@@ -839,11 +841,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Tek kare zenit hesabi (arka is parcacigi). @return (sonuc, basarisizlik nedeni) */
+    /** Karenin cekim anindaki olcumleri (arka plan hesabi sonraki kareden etkilenmesin). */
+    private class FrameMeta(val epochMs: Long?, val up: DoubleArray?, val rot: Int, val spread: Float?)
+
+    private fun currentMeta() = FrameMeta(selectedCaptureEpochMs, selectedUpMeasured, selectedDisplayRotationDeg, selectedTiltSpreadDeg)
+
     private fun computeZenith(
         bitmap: Bitmap,
         source: CaptureSource,
         observationDateTime: LocalDateTime,
-        calibration: OrientationCalibration
+        calibration: OrientationCalibration,
+        meta: FrameMeta = currentMeta()
     ): Pair<ZenithComputation?, String> {
         val locator = zenithLocator ?: return Pair(null, "katalog hazir degil")
         if (calibration.note.contains("varsayim", ignoreCase = true)) {
@@ -851,14 +859,14 @@ class MainActivity : AppCompatActivity() {
         }
         return try {
             val stars = starDetector.detectStars(bitmap)
-            val useExactTime = source == CaptureSource.CAMERA && dateModeToday.isChecked && selectedCaptureEpochMs != null
-            val epochMs = if (useExactTime) selectedCaptureEpochMs!! else
+            val useExactTime = source == CaptureSource.CAMERA && dateModeToday.isChecked && meta.epochMs != null
+            val epochMs = if (useExactTime) meta.epochMs!! else
                 observationDateTime.atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
             val timeSigma = if (useExactTime) 2.0 else 30.0
-            val fused = source == CaptureSource.CAMERA && selectedUpMeasured != null && calibration.note.contains("füzyonu")
-            val rot = selectedDisplayRotationDeg
+            val fused = source == CaptureSource.CAMERA && meta.up != null && calibration.note.contains("füzyonu")
+            val rot = meta.rot
             val calibrated = fused && tiltCalibration.isCalibrated(rot)
-            val spread = if (fused) (selectedTiltSpreadDeg ?: 0.5f).toDouble() else 0.0
+            val spread = if (fused) (meta.spread ?: 0.5f).toDouble() else 0.0
             val sysSigma = when {
                 calibrated -> {
                     val r = tiltCalibration.residualDeg(rot).let { if (it.isNaN()) 0.1 else it }
@@ -871,13 +879,13 @@ class MainActivity : AppCompatActivity() {
             }
             val tiltSigma = Math.hypot(spread, sysSigma)
             val calNote = if (calibrated) "Sensor kalibreli (${tiltCalibration.frameCount(rot)} kare)" else "Sensor KALIBRE DEGIL (KALIBRE ET onerilir)"
-            val upUsed = if (calibrated) tiltCalibration.correct(rot, selectedUpMeasured!!)
+            val upUsed = if (calibrated) tiltCalibration.correct(rot, meta.up!!)
                 else ZenithFix.upFromTilt(calibration.pitchDeg.toDouble(), calibration.rollDeg.toDouble())
             val out = if (calibrated) {
                 locator.locate(
                     stars = stars, widthPx = bitmap.width, heightPx = bitmap.height,
                     longSideFovDeg = horizontalFov.toDouble(),
-                    upCam = tiltCalibration.correct(rot, selectedUpMeasured!!),
+                    upCam = tiltCalibration.correct(rot, meta.up!!),
                     epochMillis = epochMs, tiltSigmaDeg = tiltSigma, timeSigmaSec = timeSigma
                 )
             } else {
@@ -951,9 +959,10 @@ class MainActivity : AppCompatActivity() {
 
     /** CEK / otomatik cekim girisi: seri mod aciksa 8 kare (4 yon), degilse tek kare. */
     private fun startCaptureSequence() {
-        if (burstActive) { finishBurst(); return }
+        if (burstActive) { requestFinishBurst(); return }
         if (::burstSwitch.isInitialized && burstSwitch.isChecked && zenithLocator != null) {
             burstActive = true; burstWaiting = false; burstIndex = 0; burstFrames.clear()
+            burstPending = 0; burstAllCaptured = false; burstFailures = 0
             burstLastNote = ""
             resultTextView.text = "Seri cekim basladi: telefonu sabit tutun (0/$burstTotal)"
         } else {
@@ -962,35 +971,64 @@ class MainActivity : AppCompatActivity() {
         takePhotoForSelection()
     }
 
-    /** UI is parcacigi: bir kare cekildi (setSelectedPhoto yapildi). */
+    private var burstPending = 0
+    private var burstAllCaptured = false
+    private var burstFailures = 0
+    private val solveExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+
+    /** UI is parcacigi: bir kare cekildi. Yildiz cozumu arka planda yapilir; kullanici beklemeden donmeye devam eder. */
     private fun onBurstFrameCaptured() {
         val bitmap = selectedBitmap
         val dt = resolveObservationDateTime(CaptureSource.CAMERA)
         burstLastCompassAz = selectedCameraAzimuthDeg?.toDouble() ?: 0.0
         if (bitmap == null || dt == null) { burstFrameDone(null); return }
-        val calibration = resolveOrientationCalibration(CaptureSource.CAMERA, bitmap.height, verticalFov, hemisphereMode)
-        resultTextView.text = "Seri cekim: kare ${burstIndex + 1}/$burstTotal isleniyor…"
-        cameraExecutor.execute {
-            val (comp, reason) = computeZenith(bitmap, CaptureSource.CAMERA, dt, calibration)
-            if (comp == null) burstLastNote = reason
-            runOnUiThread { burstFrameDone(comp) }
+        val shaky = (selectedTiltSpreadDeg ?: 0f) > BURST_MAX_SPREAD_DEG
+        if (shaky) {
+            // Titreyen kare konumu bozar: sayma, ayni yonde yeniden cek (sabitlenince halka dolunca otomatik).
+            burstLastCompassAz = (burstLastCompassAz + 180.0) % 360.0
+            burstWaiting = true
+            burstWaitStartMs = android.os.SystemClock.elapsedRealtime()
+            aimGuide.reset()
+            setProcessingState(false)
+            captureButton.isEnabled = true
+            resultTextView.text = "Kare titredi (±%.1f°), sayilmadi. Telefonu sabitleyin: halka dolunca yeniden cekilecek ($burstIndex/$burstTotal)".format(selectedTiltSpreadDeg ?: 0f)
+            return
         }
+        val calibration = resolveOrientationCalibration(CaptureSource.CAMERA, bitmap.height, verticalFov, hemisphereMode)
+        val meta = currentMeta()
+        burstPending++
+        solveExecutor.execute {
+            val (comp, reason) = computeZenith(bitmap, CaptureSource.CAMERA, dt, calibration, meta)
+            runOnUiThread {
+                burstPending--
+                if (burstActive) {
+                    if (comp != null) addBurstResult(comp) else { burstFailures++; burstLastNote = reason }
+                    if (burstAllCaptured && burstPending == 0) finishBurst()
+                    else if (!burstAllCaptured && burstFailures >= 3 && burstFrames.isEmpty() && burstPending == 0) requestFinishBurst()
+                }
+            }
+        }
+        burstAdvance()
     }
 
-    /** UI is parcacigi: bir kare bitti (basarili ya da degil). */
-    private fun burstFrameDone(comp: ZenithComputation?) {
-        if (comp != null) {
-            val plate = comp.out.plate!!
-            burstFrames.add(SwingFrame(plate.celFromCam, comp.upUsedCam, comp.epochMs, Math.max(comp.spreadDeg, 0.03)))
-            burstSystematicSigma = comp.systematicSigmaDeg
-            burstTimeSigma = comp.timeSigmaSec
-            burstPlateRms = plate.rmsDeg
-            burstLastNote = comp.calNote
-        }
+    private fun addBurstResult(comp: ZenithComputation) {
+        val plate = comp.out.plate!!
+        burstFrames.add(SwingFrame(plate.celFromCam, comp.upUsedCam, comp.epochMs, Math.max(comp.spreadDeg, 0.03)))
+        burstSystematicSigma = comp.systematicSigmaDeg
+        burstTimeSigma = comp.timeSigmaSec
+        burstPlateRms = plate.rmsDeg
+        burstLastNote = comp.calNote
+    }
+
+    /** Kare alinamadi/hazirlanamadi. */
+    private fun burstFrameDone(@Suppress("UNUSED_PARAMETER") comp: ZenithComputation?) {
+        burstFailures++
+        burstAdvance()
+    }
+
+    private fun burstAdvance() {
         burstIndex++
-        val abortEarly = burstIndex >= 3 && burstFrames.isEmpty()
-        if (burstIndex < burstTotal && !abortEarly) {
-            // Sonraki kare: kullanici telefonu ayni egimle ~90° dondurup sabitleyince otomatik cekilir.
+        if (burstIndex < burstTotal) {
             burstWaiting = true
             burstWaitStartMs = android.os.SystemClock.elapsedRealtime()
             aimGuide.reset()
@@ -999,7 +1037,16 @@ class MainActivity : AppCompatActivity() {
             captureButton.text = "BITIR ($burstIndex/$burstTotal)"
             resultTextView.text = "Kare $burstIndex/$burstTotal tamam. Telefonu AYNI egimle ~90° yana dondurup sabit tutun (otomatik cekilir; BITIR ile erken bitirin)"
         } else {
-            finishBurst()
+            requestFinishBurst()
+        }
+    }
+
+    private fun requestFinishBurst() {
+        burstAllCaptured = true
+        burstWaiting = false
+        if (burstPending == 0) finishBurst() else {
+            setProcessingState(true)
+            resultTextView.text = "Son kareler isleniyor…"
         }
     }
 

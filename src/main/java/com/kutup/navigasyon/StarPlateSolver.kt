@@ -261,7 +261,7 @@ class StarPlateSolver(
      */
     fun solve(
         stars: List<Star>, widthPx: Int, heightPx: Int, longSideFovDegGuess: Double,
-        maxMagForVerify: Float = 5.5f, maxMillis: Long = 12_000L, minMatches: Int = 8
+        maxMagForVerify: Float = 6.0f, maxMillis: Long = 12_000L, minMatches: Int = 8
     ): PlateSolution? {
         val deadline = System.nanoTime() + maxMillis * 1_000_000L
         if (stars.size < 5 || widthPx < 16 || heightPx < 16) return null
@@ -349,7 +349,7 @@ class StarPlateSolver(
             val cams = ArrayList<DoubleArray>(); val apparent = ArrayList<DoubleArray>()
             for (o in obs) {
                 val cv = camVec(o, cx, cy, f)
-                val (i, _) = nearestCatalog(mulVec(r, cv), Math.toRadians(0.15), 5.5f)
+                val (i, _) = nearestCatalog(mulVec(r, cv), Math.toRadians(0.15), 6.0f)
                 if (i < 0 || !used.add(i)) continue
                 val v0 = starVec(i)
                 val v = if (beta != null) aberrate(v0, beta) else v0
