@@ -2,7 +2,7 @@ name: Build and Publish APK
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, zenith-fix ]
   workflow_dispatch:
 
 permissions:
@@ -59,8 +59,11 @@ jobs:
       - name: Publish latest release
         uses: ncipollo/release-action@v1
         with:
-          tag: apk-latest
-          name: Kutup Navigasyon APK (Latest)
+          # master/main: apk-latest (eski davranis); diger dallar kendi etiketine yayinlanir, master'in APK'sinin ustune yazmaz
+          tag: ${{ (github.ref_name == 'master' || github.ref_name == 'main') && 'apk-latest' || format('apk-{0}', github.ref_name) }}
+          name: Kutup Navigasyon APK (${{ github.ref_name }})
+          prerelease: ${{ github.ref_name != 'master' && github.ref_name != 'main' }}
+          commit: ${{ github.sha }}
           body: |
             Otomatik olusturulan debug APK.
             Run ID: ${{ github.run_id }}
