@@ -24,6 +24,9 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # varsayilan paket listesindeki 'tools' artik yok ve kurulumu bozuyor; paketleri asagida kuruyoruz
+          packages: ''
 
       - name: Install Android SDK packages
         run: |
