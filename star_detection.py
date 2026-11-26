@@ -33,12 +33,17 @@ def get_star_brightness(img, cnt, x, y, w, h):
     Eski kod: bounding box tüm piksel ortalaması → karanlık kenarlar dahil
     Yeni kod: sadece kontur içindeki piksellerin maksimum + ortalama kombinasyonu
     """
-    # Kontur maskesi oluştur
-    mask = np.zeros(img.shape[:2], dtype=np.uint8)
-    cv2.drawContours(mask, [cnt], -1, 255, -1)
+    # Kontur maskesi sadece sınırlayıcı kutu (ROI) boyutunda oluşturulur.
+    # Eski kod her yıldız için TÜM görüntü boyutunda maske üretiyordu
+    # (12 MP fotoğrafta yüzlerce yıldız için çok yavaş ve bellek yoğun).
+    roi = img[y:y + h, x:x + w]
+    if roi.size == 0:
+        return 0.0
+    mask = np.zeros(roi.shape[:2], dtype=np.uint8)
+    cv2.drawContours(mask, [cnt], -1, 255, -1, offset=(-x, -y))
 
     # Sadece yıldız piksellerini al
-    star_pixels = img[mask == 255]
+    star_pixels = roi[mask == 255]
 
     if len(star_pixels) == 0:
         return 0.0

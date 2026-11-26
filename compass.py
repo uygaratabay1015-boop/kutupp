@@ -14,7 +14,9 @@ class CompassSensor:
 
     def __init__(self, mode="mock", azimuth=0.0):
         self.mode = mode
-        self.azimuth = azimuth
+        # Azimuth her zaman [0, 360) araliginda tutulur; aksi halde negatif/360+
+        # degerlerde yon adi ve sapma hesaplari yanlis cikiyordu.
+        self.azimuth = float(azimuth) % 360.0
         self.noise = 0.0
 
     def get_azimuth(self, add_noise=False):
@@ -30,7 +32,7 @@ class CompassSensor:
         return az
 
     def set_azimuth(self, azimuth):
-        self.azimuth = azimuth % 360
+        self.azimuth = float(azimuth) % 360.0
 
     def is_facing_north(self, tolerance=15):
         az = self.get_azimuth()

@@ -1,0 +1,19 @@
+# Gradle / Android Studio
+.gradle/
+build/
+local.properties
+.idea/caches/
+.idea/libraries/
+.idea/workspace.xml
+.idea/deviceManager.xml
+*.iml
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Uretilen ciktilar
+konum_haritasi.png
+observations_history.png

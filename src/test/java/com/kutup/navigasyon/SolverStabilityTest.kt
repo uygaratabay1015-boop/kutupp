@@ -40,6 +40,38 @@ class SolverStabilityTest {
     }
 
     @Test
+    fun latitudeSolver_usesFull3DProjection_forOffAxisPoints() {
+        val solver = LatitudeSolver()
+
+        // Merkez piksel: yukseklik ~ pitch (kirilma duzeltmesi ~0.02 derece).
+        val center = solver.calculateLatitudeFromCandidatePoints(
+            candidatePointsWithWeight = listOf(Triple(640f, 360f, 1f)),
+            imageWidth = 1280,
+            imageHeight = 720,
+            verticalFov = 60f,
+            horizontalFov = 90f,
+            cameraPitchDeg = 40f,
+            cameraRollDeg = 0f,
+            southernHemisphere = false
+        )
+        assertEquals(39.98f, center.latitude, 0.1f)
+
+        // Yatayda ofsetli nokta: bagimsiz 3B donusum hesabi ~41.84 derece verir.
+        // Eski "pitch + atan(ny)" yaklasimi ~54.4 derece (yaklasik 12.5 derece hata) veriyordu.
+        val offAxis = solver.calculateLatitudeFromCandidatePoints(
+            candidatePointsWithWeight = listOf(Triple(1100f, 200f, 1f)),
+            imageWidth = 1280,
+            imageHeight = 720,
+            verticalFov = 60f,
+            horizontalFov = 90f,
+            cameraPitchDeg = 40f,
+            cameraRollDeg = 0f,
+            southernHemisphere = false
+        )
+        assertEquals(41.84f, offAxis.latitude, 0.1f)
+    }
+
+    @Test
     fun skyPatternMatcher_prefersNorthUrsaTemplate_whenUrsaLikeGeometryGiven() {
         val matcher = SkyPatternMatcher(
             listOf(

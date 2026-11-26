@@ -7,11 +7,15 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ImageFormat
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CaptureRequest
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.util.Size
 import android.view.View
@@ -20,13 +24,18 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.Camera2CameraControl
+import androidx.camera.camera2.interop.CaptureRequestOptions
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
@@ -53,6 +62,7 @@ import kotlin.math.atan
 import kotlin.math.hypot
 import kotlin.math.pow
 
+@kotlin.OptIn(ExperimentalCamera2Interop::class)
 class MainActivity : AppCompatActivity() {
 
     enum class Hemisphere { NORTH, SOUTH }
@@ -77,6 +87,12 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "KutupNav"
+        private const val MIN_TILT_QUALITY = 0.15f
+        private const val TARGET_EXPOSURE_NS = 3_000_000_000L
+        private const val TARGET_ISO = 1600
+        private const val MAX_DECODE_PX = 2600
+        private const val MIN_USEFUL_EXPOSURE_NS = 500_000_000L
+        private const val SHAKY_TILT_SPREAD_DEG = 1.0f
         private const val REQUEST_CODE_PERMISSIONS = 10
         private val REQUIRED_PERMISSIONS = arrayOf(Manifest.permission.CAMERA)
     }
@@ -104,6 +120,44 @@ class MainActivity : AppCompatActivity() {
     private lateinit var offlinePlateSwitch: SwitchCompat
 
     private lateinit var compass: CompassSensor
+    private lateinit var tiltSensor: TiltSensor
+    private lateinit var aimGuideView: AimGuideView
+    private val aimGuide = AimGuide()
+    private val aimHandler = Handler(Looper.getMainLooper())
+    private val aimTick = object : Runnable {
+        override fun run() {
+            if (::tiltSensor.isInitialized && ::aimGuideView.isInitialized) {
+                val tilt = tiltSensor.estimateForCapture(previewView.display?.rotation ?: android.view.Surface.ROTATION_0, 1.0)
+                val aimState = aimGuide.evaluate(tilt, android.os.SystemClock.elapsedRealtime())
+                aimGuideView.update(aimState)
+                val nowMs = android.os.SystemClock.elapsedRealtime()
+                if (burstWaiting && !isProcessing && imageCapture != null && aimState.ready) {
+                    val turned = angleDiffDeg(compass.getAzimuth().toDouble(), burstLastCompassAz) >= 60.0
+                    if (turned || nowMs - burstWaitStartMs > 20000L) {
+                        burstWaiting = false
+                        aimGuide.reset()
+                        takePhotoForSelection()
+                    }
+                } else if (!burstActive && aimState.ready && autoShutterSwitch.isChecked && !isProcessing && imageCapture != null && nowMs - lastAutoShotMs > 6000L) {
+                    lastAutoShotMs = nowMs
+                    aimGuide.reset()
+                    startCaptureSequence()
+                }
+            }
+            aimHandler.postDelayed(this, 100L)
+        }
+    }
+    private var selectedTiltLabel: String? = null
+    private var selectedTiltSpreadDeg: Float? = null
+    private var selectedDisplayRotationDeg: Int = 0
+    private var selectedUpMeasured: DoubleArray? = null
+    private var tiltCalibration = TiltCalibration()
+    private lateinit var calibrateButton: Button
+    private lateinit var autoShutterSwitch: SwitchCompat
+    private lateinit var burstSwitch: SwitchCompat
+    private var lastAutoShotMs = 0L
+    private var selectedCaptureEpochMs: Long? = null
+    @Volatile private var zenithLocator: ZenithLocator? = null
     private lateinit var starDetector: StarDetector
     private lateinit var polarisFinder: PolarisFinder
     private lateinit var southernCrossFinder: SouthernCrossFinder
@@ -161,7 +215,11 @@ class MainActivity : AppCompatActivity() {
                         captureDateTime = selectedExifDateTime ?: nowMinutePrecision()
                     )
                     setProcessingState(false)
-                    Toast.makeText(this, "Foto secildi. HESAPLA'ya bas.", Toast.LENGTH_SHORT).show()
+                    val hasExifTime = selectedExifDateTime != null
+                    val msg = "Galeri fotosu: telefon egim sensoru verisi yok, bu yuzden dogruluk dusuk olur. " +
+                        "Pitch/Roll degerlerini elle girin" + (if (hasExifTime) "." else " ve cekim saatini kontrol edin (EXIF'te yok).") +
+                        " En iyi sonuc icin uygulamanin kamerasiyla cekin."
+                    Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Galeri isleme hatasi", e)
@@ -191,7 +249,25 @@ class MainActivity : AppCompatActivity() {
         }
 
         compass.startListening()
+        tiltSensor.startListening()
         updateModeText()
+    }
+
+    // Sensorler arka planda calismaya devam edip bataryayi tuketmesin diye
+    // yalnizca on plandayken dinlenir (startListening/stopListening idempotent).
+    override fun onResume() {
+        super.onResume()
+        if (::compass.isInitialized) compass.startListening()
+        if (::tiltSensor.isInitialized) tiltSensor.startListening()
+        aimGuide.reset()
+        aimHandler.post(aimTick)
+    }
+
+    override fun onPause() {
+        aimHandler.removeCallbacks(aimTick)
+        if (::compass.isInitialized) compass.stopListening()
+        if (::tiltSensor.isInitialized) tiltSensor.stopListening()
+        super.onPause()
     }
 
     override fun onDestroy() {
@@ -199,11 +275,24 @@ class MainActivity : AppCompatActivity() {
         selectedBitmap?.recycle()
         latestAnnotatedBitmap?.recycle()
         compass.stopListening()
+        if (::tiltSensor.isInitialized) tiltSensor.stopListening()
         cameraExecutor.shutdown()
     }
 
     private fun initializeUI() {
         previewView = findViewById(R.id.previewView)
+        aimGuideView = findViewById(R.id.aimGuideView)
+        calibrateButton = findViewById(R.id.calibrateButton)
+        autoShutterSwitch = findViewById(R.id.autoShutterSwitch)
+        burstSwitch = findViewById(R.id.burstSwitch)
+        calibrateButton.setOnClickListener { onCalibratePressed() }
+        calibrateButton.setOnLongClickListener {
+            tiltCalibration.clear(); saveTiltCalibration()
+            Toast.makeText(this, "Sensor kalibrasyonu sifirlandi", Toast.LENGTH_SHORT).show()
+            true
+        }
+        aimGuideView.setGuide(aimGuide)
+        showHowToShootOnce()
         controlPanel = findViewById(R.id.controlPanel)
         togglePanelButton = findViewById(R.id.togglePanelButton)
         captureButton = findViewById(R.id.captureButton)
@@ -252,7 +341,7 @@ class MainActivity : AppCompatActivity() {
         calculateButton.isEnabled = false
         showMapButton.isEnabled = false
 
-        captureButton.setOnClickListener { takePhotoForSelection() }
+        captureButton.setOnClickListener { startCaptureSequence() }
         galleryButton.setOnClickListener {
             setProcessingState(true)
             pickImageLauncher.launch("image/*")
@@ -266,6 +355,13 @@ class MainActivity : AppCompatActivity() {
             }
         }
         togglePanelButton.setOnClickListener { toggleControlPanel() }
+        val advancedPanel = findViewById<View>(R.id.advancedPanel)
+        val advancedToggle = findViewById<Button>(R.id.advancedToggleButton)
+        advancedToggle.setOnClickListener {
+            val show = advancedPanel.visibility != View.VISIBLE
+            advancedPanel.visibility = if (show) View.VISIBLE else View.GONE
+            advancedToggle.text = if (show) "Gelismis ayarlar ▴" else "Gelismis ayarlar ▾"
+        }
         calculateButton.setOnClickListener { onCalculatePressed() }
         showMapButton.setOnClickListener { showEstimatedLocationOnMap() }
         modeButton.setOnClickListener {
@@ -279,12 +375,23 @@ class MainActivity : AppCompatActivity() {
     private fun toggleControlPanel() {
         val isVisible = controlPanel.visibility == View.VISIBLE
         controlPanel.visibility = if (isVisible) View.GONE else View.VISIBLE
-        togglePanelButton.text = if (isVisible) "Panel Goster" else "Panel Gizle"
+        togglePanelButton.text = if (isVisible) "Paneli Goster" else "Paneli Gizle"
     }
 
     private fun initializeModules() {
         compass = CompassSensor(this)
+        tiltSensor = TiltSensor(this)
         starDetector = StarDetector()
+        tiltCalibration = TiltCalibration.deserialize(getSharedPreferences("kutup_prefs", MODE_PRIVATE).getString("tilt_cal", null))
+        // Yildiz katalogu + plaka cozucu: tamamen cihaz ici (assets), arka planda hazirlanir.
+        Thread {
+            try {
+                val catalog = assets.open("star_catalog_j2000.bin").use { StarCatalog.load(it) }
+                zenithLocator = ZenithLocator(StarPlateSolver(catalog))
+            } catch (e: Exception) {
+                Log.e(TAG, "Yildiz katalogu yuklenemedi", e)
+            }
+        }.apply { name = "star-catalog-loader"; isDaemon = true; start() }
         polarisFinder = PolarisFinder()
         southernCrossFinder = SouthernCrossFinder()
         latitudeSolver = LatitudeSolver()
@@ -330,6 +437,13 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // --- gece cekimi: telefonun otomatik (kisa pozlu, gurultu azaltmali, dusuk cozunurluklu) cekimi yildizlari yok eder.
+    private var nightExposureNs: Long = 0L          // 0: manuel pozlama uygulanmadi
+    private var nightIso: Int = 0
+    private var cameraTimestampRealtime = false
+
+    private var nightOptions: CaptureRequestOptions? = null
+
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
         cameraProviderFuture.addListener({
@@ -340,14 +454,17 @@ class MainActivity : AppCompatActivity() {
             }
 
             imageCapture = ImageCapture.Builder()
-                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                .setTargetResolution(Size(1280, 720))
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                .setTargetResolution(Size(4032, 3024))
+                .setJpegQuality(100)
                 .build()
 
             try {
                 cameraProvider.unbindAll()
                 camera = cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture)
                 updateVerticalFovFromCamera(camera)
+                // Manuel pozlama YALNIZCA cekim aninda uygulanir (onizleme otomatik kalir; yoksa gunduz/gece onizleme bozulur).
+                nightOptions = camera?.let { buildNightOptions(it) }
                 captureButton.isEnabled = true
                 updateCalculateButton()
             } catch (exc: Exception) {
@@ -356,6 +473,52 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Kamera baslatilamadi", Toast.LENGTH_SHORT).show()
             }
         }, ContextCompat.getMainExecutor(this))
+    }
+
+    /**
+     * Yildiz icin cekim ayarlari: manuel poz (<= ~3 sn: yildiz izi ~1 piksel), orta ISO, sonsuza odak,
+     * minimum gurultu azaltma/keskinlestirme, OIS kapali. Telefon bunlari desteklemiyorsa null.
+     */
+    private fun buildNightOptions(cam: Camera): CaptureRequestOptions? {
+        return try {
+            val c2 = Camera2CameraInfo.from(cam.cameraInfo)
+            val expRange = c2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+            val isoRange = c2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+            val tsSource = c2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)
+            cameraTimestampRealtime = tsSource == CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
+            if (expRange == null || isoRange == null) return null
+            val exposure = TARGET_EXPOSURE_NS.coerceIn(expRange.lower, expRange.upper)
+            val iso = TARGET_ISO.coerceIn(isoRange.lower, isoRange.upper)
+            nightExposureNs = exposure
+            nightIso = iso
+            if (exposure < MIN_USEFUL_EXPOSURE_NS) {
+                Toast.makeText(this, "Bu telefon uzun pozlamayi desteklemiyor (en fazla %.2f sn): az yildiz gorunebilir".format(exposure / 1e9), Toast.LENGTH_LONG).show()
+            }
+            CaptureRequestOptions.Builder()
+                .setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                .setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, exposure)
+                .setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, iso)
+                .setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                .setCaptureRequestOption(CaptureRequest.LENS_FOCUS_DISTANCE, 0f)
+                .setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_MINIMAL)
+                .setCaptureRequestOption(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF)
+                .setCaptureRequestOption(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
+                .build()
+        } catch (e: Exception) {
+            Log.w(TAG, "Gece cekim ayarlari uygulanamadi, varsayilan kullaniliyor", e)
+            nightExposureNs = 0L
+            null
+        }
+    }
+
+    /** Cekim bitince onizlemeyi otomatik pozlamaya geri al. */
+    private fun restoreAutoExposure() {
+        if (nightOptions == null) return
+        try {
+            camera?.let { Camera2CameraControl.from(it.cameraControl).clearCaptureRequestOptions() }
+        } catch (e: Exception) {
+            Log.w(TAG, "Otomatik pozlamaya donulemedi", e)
+        }
     }
 
     private fun updateVerticalFovFromCamera(cam: Camera?) {
@@ -374,10 +537,101 @@ class MainActivity : AppCompatActivity() {
             if (sensorWidthMm != null && focalMm != null && sensorWidthMm > 0f && focalMm > 0f) {
                 val hFovRad = 2.0 * atan((sensorWidthMm / (2.0 * focalMm)).toDouble())
                 horizontalFov = Math.toDegrees(hFovRad).toFloat().coerceIn(35f, 120f)
+                aimGuide.setFov(horizontalFov)
             }
         } catch (e: Exception) {
             Log.w(TAG, "Kamera FOV metadata okunamadi, varsayilan 60 derece kullaniliyor", e)
         }
+    }
+
+    private fun saveTiltCalibration() {
+        getSharedPreferences("kutup_prefs", MODE_PRIVATE).edit().putString("tilt_cal", tiltCalibration.serialize()).apply()
+    }
+
+    /**
+     * Sensor kalibrasyonu: BILINEN konumda cekilmis, sensor fuzyonlu bir kareyle, telefonun sabit
+     * egim sapmasini ogrenir. Ne kadar cok kare (farkli gece/aci), o kadar iyi: en az ~8-10 oneririz.
+     */
+    private fun onCalibratePressed() {
+        val bitmap = selectedBitmap
+        val upMeasured = selectedUpMeasured
+        val epochMs = selectedCaptureEpochMs
+        val locator = zenithLocator
+        if (bitmap == null || selectedSource != CaptureSource.CAMERA || upMeasured == null || epochMs == null) {
+            Toast.makeText(this, "Once uygulamanin kamerasiyla (sensor fuzyonlu) bir gece fotografi cekin", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (locator == null) {
+            Toast.makeText(this, "Yildiz katalogu hazir degil, biraz bekleyin", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val prefs = getSharedPreferences("kutup_prefs", MODE_PRIVATE)
+        val latInput = EditText(this).apply { hint = "Enlem (ornek 41.0082)"; setText(prefs.getString("cal_lat", "")) }
+        val lonInput = EditText(this).apply { hint = "Boylam (ornek 28.9784)"; setText(prefs.getString("cal_lon", "")) }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 16, 48, 0)
+            addView(latInput); addView(lonInput)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Bu fotografin cekildigi gercek konum")
+            .setMessage("Telefon sapmasini ogrenmek icin gercek enlem/boylami girin (ondalik derece, boylam dogu +). Telefon sabitken cekin.")
+            .setView(box)
+            .setNegativeButton("Iptal", null)
+            .setPositiveButton("Kalibre et") { _, _ ->
+                val lat = latInput.text.toString().replace(',', '.').toDoubleOrNull()
+                val lon = lonInput.text.toString().replace(',', '.').toDoubleOrNull()
+                if (lat == null || lon == null || lat !in -90.0..90.0 || lon !in -180.0..180.0) {
+                    Toast.makeText(this, "Gecersiz enlem/boylam", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                prefs.edit().putString("cal_lat", latInput.text.toString()).putString("cal_lon", lonInput.text.toString()).apply()
+                setProcessingState(true)
+                val rot = selectedDisplayRotationDeg
+                cameraExecutor.execute {
+                    val stars = starDetector.detectStars(bitmap)
+                    val trueUp = locator.trueUpFromKnownSite(
+                        stars, bitmap.width, bitmap.height, horizontalFov.toDouble(), lat, lon, epochMs
+                    )
+                    runOnUiThread {
+                        setProcessingState(false)
+                        if (trueUp == null) {
+                            Toast.makeText(this, "Yildizlar cozulemedi, kalibrasyon eklenmedi", Toast.LENGTH_LONG).show()
+                        } else if (!tiltCalibration.addFrame(rot, upMeasured, trueUp)) {
+                            Toast.makeText(this, "Bu kare ortalamadan cok sapti (>1.5°), atlandi. Sabit tutup tekrar cekin.", Toast.LENGTH_LONG).show()
+                        } else {
+                            saveTiltCalibration()
+                            val n = tiltCalibration.frameCount(rot)
+                            val res = tiltCalibration.residualDeg(rot)
+                            Toast.makeText(
+                                this,
+                                "Kalibrasyon: $n kare" + (if (res.isNaN()) "" else " | tutarlilik ±%.2f°".format(res)) +
+                                    (if (n < 8) " | en az 8-10 kare onerilir" else " | yeterli"),
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                }
+            }
+            .show()
+    }
+
+    private fun showHowToShootOnce() {
+        val prefs = getSharedPreferences("kutup_prefs", MODE_PRIVATE)
+        if (prefs.getBoolean("howto_seen", false)) return
+        AlertDialog.Builder(this)
+            .setTitle("Nasil cekilir?")
+            .setMessage(
+                "1) Telefonu acik gokyuzune cevirin; ekrandaki yesil aralikta tutun (genelde yaklasik 55°-75°, kameraya gore otomatik ayarlanir).\n" +
+                "2) Beyaz cizgiler ile hareketli cizgiyi ust uste getirin (telefon yana yatik olmasin).\n" +
+                "3) Mumkunse tripod kullanin veya telefonu bir yere dayayin; elde tutarken kolunuzu govdenize yaslayin.\n" +
+                "4) Halka dolup 'Hazir!' yazinca cekin. Her kare ~3 sn pozlanir: pozlama bitene kadar telefonu hic oynatmayin, ekrana dokunmayin.\n" +
+                "5) Seri cekimde (8 kare) her karede telefonu AYNI egimle ~90° yana dondurun: boylece sensor sapmasi kendiliginden giderilir.\n" +
+                "6) Saatin ve saat diliminin dogru oldugundan emin olun.\n\n" +
+                "Not: 1° egim hatasi yaklasik 111 km konum hatasi demektir; sabit tutmak cok onemli."
+            )
+            .setPositiveButton("Anladim") { _, _ -> prefs.edit().putBoolean("howto_seen", true).apply() }
+            .show()
     }
 
     private fun takePhotoForSelection() {
@@ -388,10 +642,53 @@ class MainActivity : AppCompatActivity() {
         }
 
         setProcessingState(true)
+        val opts = nightOptions
+        val cam = camera
+        if (opts != null && cam != null) {
+            try {
+                Camera2CameraControl.from(cam.cameraControl).setCaptureRequestOptions(opts)
+                    .addListener({ runTakePicture(localImageCapture) }, ContextCompat.getMainExecutor(this))
+                return
+            } catch (e: Exception) {
+                Log.w(TAG, "Manuel pozlama uygulanamadi, varsayilan cekim", e)
+            }
+        }
+        runTakePicture(localImageCapture)
+    }
+
+    private fun runTakePicture(localImageCapture: ImageCapture) {
         localImageCapture.takePicture(
             ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageCapturedCallback() {
                 override fun onCaptureSuccess(image: ImageProxy) {
+                    restoreAutoExposure()
+                    // Sensor penceresi cekim anina ait: once (ana is parcacigi) hesaplanir.
+                    // Pozlama penceresi (sensor zaman tabaninda) + ortasindaki gercek saat; yoksa son 1-3 sn ve "simdi".
+                    val nowNs = android.os.SystemClock.elapsedRealtimeNanos()
+                    val expNs = nightExposureNs
+                    val startNs = image.imageInfo.timestamp
+                    val timestampOk = expNs > 0L && cameraTimestampRealtime && nowNs - startNs in 0L..30_000_000_000L
+                    val tilt: CameraTilt?
+                    val captureEpochMs: Long
+                    if (timestampOk) {
+                        tilt = tiltSensor.estimateForWindow(localImageCapture.targetRotation, startNs, startNs + expNs)
+                        captureEpochMs = System.currentTimeMillis() - (nowNs - startNs) / 1_000_000L + expNs / 2_000_000L
+                    } else {
+                        tilt = tiltSensor.estimateForCapture(localImageCapture.targetRotation, Math.max(1.0, expNs / 1e9))
+                        captureEpochMs = System.currentTimeMillis() - (if (expNs > 0L) expNs / 2_000_000L + 300L else 0L)
+                    }
+                    val useTilt = tilt != null && tilt.quality >= MIN_TILT_QUALITY
+                    if (tilt != null && tilt.spreadDeg > SHAKY_TILT_SPREAD_DEG) {
+                        Toast.makeText(this@MainActivity, "Telefon titredi (±%.1f°). Sabit tutup tekrar cekin.".format(tilt.spreadDeg), Toast.LENGTH_LONG).show()
+                    }
+                    val capturePitch = if (useTilt) tilt!!.pitchDeg else compass.getPitchDegrees()
+                    val captureRoll = if (useTilt) tilt!!.rollDeg else compass.getRollDegrees()
+                    val captureRotationDeg = TiltEstimator.surfaceRotationToDegrees(localImageCapture.targetRotation)
+                    val upMeasured = if (useTilt) ZenithFix.upFromTilt(capturePitch.toDouble(), captureRoll.toDouble()) else null
+                    val tiltSpread = if (useTilt) tilt!!.spreadDeg else null
+                    val tiltLabel = if (useTilt) {
+                        "Pitch/Roll: Sensor füzyonu (±%.2f°%s)".format(tilt!!.spreadDeg, if (tilt.usedGyro) ", jiroskop" else "")
+                    } else null
                     cameraExecutor.execute {
                         try {
                             val rawBitmap = imageToBitmap(image)
@@ -400,19 +697,28 @@ class MainActivity : AppCompatActivity() {
                                 setSelectedPhoto(
                                     bitmap = bitmap,
                                     source = CaptureSource.CAMERA,
-                                    capturePitchDeg = compass.getPitchDegrees(),
-                                    captureRollDeg = compass.getRollDegrees(),
+                                    capturePitchDeg = capturePitch,
+                                    captureRollDeg = captureRoll,
                                     captureAzimuthDeg = compass.getAzimuth(),
-                                    captureDateTime = nowMinutePrecision()
+                                    captureDateTime = nowMinutePrecision(),
+                                    tiltLabel = tiltLabel,
+                                    tiltSpreadDeg = tiltSpread,
+                                    captureEpochMs = captureEpochMs,
+                                    displayRotationDeg = captureRotationDeg,
+                                    upMeasured = upMeasured
                                 )
-                                setProcessingState(false)
-                                Toast.makeText(this@MainActivity, "Foto cekildi. HESAPLA'ya bas.", Toast.LENGTH_SHORT).show()
+                                if (burstActive) {
+                                    onBurstFrameCaptured()
+                                } else {
+                                    setProcessingState(false)
+                                    Toast.makeText(this@MainActivity, "Foto cekildi. HESAPLA'ya bas.", Toast.LENGTH_SHORT).show()
+                                }
                             }
                         } catch (e: Exception) {
                             Log.e(TAG, "Kamera fotografi hazirlama hatasi", e)
                             runOnUiThread {
                                 Toast.makeText(this@MainActivity, "Fotograf hazirlanamadi", Toast.LENGTH_SHORT).show()
-                                setProcessingState(false)
+                                if (burstActive) burstFrameDone(null) else setProcessingState(false)
                             }
                         } finally {
                             image.close()
@@ -421,9 +727,10 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 override fun onError(exc: ImageCaptureException) {
+                    restoreAutoExposure()
                     Log.e(TAG, "Fotograf cekme hatasi", exc)
-                    setProcessingState(false)
                     Toast.makeText(this@MainActivity, "Fotograf cekilemedi", Toast.LENGTH_SHORT).show()
+                    if (burstActive) burstFrameDone(null) else setProcessingState(false)
                 }
             }
         )
@@ -435,7 +742,12 @@ class MainActivity : AppCompatActivity() {
         capturePitchDeg: Float? = null,
         captureRollDeg: Float? = null,
         captureAzimuthDeg: Float? = null,
-        captureDateTime: LocalDateTime? = null
+        captureDateTime: LocalDateTime? = null,
+        tiltLabel: String? = null,
+        tiltSpreadDeg: Float? = null,
+        captureEpochMs: Long? = null,
+        displayRotationDeg: Int = 0,
+        upMeasured: DoubleArray? = null
     ) {
         selectedBitmap?.recycle()
         selectedBitmap = bitmap
@@ -443,6 +755,11 @@ class MainActivity : AppCompatActivity() {
         selectedCameraPitchDeg = capturePitchDeg ?: compass.getPitchDegrees()
         selectedCameraRollDeg = captureRollDeg ?: compass.getRollDegrees()
         selectedCameraAzimuthDeg = captureAzimuthDeg ?: compass.getAzimuth()
+        selectedTiltLabel = if (source == CaptureSource.CAMERA) tiltLabel else null
+        selectedTiltSpreadDeg = if (source == CaptureSource.CAMERA) tiltSpreadDeg else null
+        selectedCaptureEpochMs = if (source == CaptureSource.CAMERA) captureEpochMs else null
+        selectedDisplayRotationDeg = displayRotationDeg
+        selectedUpMeasured = if (source == CaptureSource.CAMERA) upMeasured else null
         selectedCaptureDateTime = captureDateTime ?: nowMinutePrecision()
         if (source == CaptureSource.CAMERA) {
             selectedExifDateTime = null
@@ -473,6 +790,9 @@ class MainActivity : AppCompatActivity() {
         setProcessingState(true)
         val useOfflinePlate = offlinePlateSwitch.isChecked
         cameraExecutor.execute {
+            // 1) Zenit yontemi (cihaz ici yildiz cozumu + egim + saat). Olmazsa eski yonteme dus.
+            val zenith = tryZenithLocate(bitmap, source, observationDateTime, calibration)
+            if (zenith.first) return@execute
             processBitmap(
                 bitmap = bitmap,
                 source = source,
@@ -480,10 +800,223 @@ class MainActivity : AppCompatActivity() {
                 pitchForSolve = calibration.pitchDeg,
                 rollForSolve = calibration.rollDeg,
                 azimuthForSolve = calibration.azimuthDeg,
-                calibrationNote = calibration.note,
+                calibrationNote = calibration.note + " | Zenit: " + zenith.second,
                 useOfflinePlate = useOfflinePlate
             )
         }
+    }
+
+    private class ZenithComputation(
+        val out: ZenithOutcome,
+        val spreadDeg: Double,
+        /** Kareler arasi ortak (azalmayan) egim belirsizligi. */
+        val systematicSigmaDeg: Double,
+        val timeSigmaSec: Double,
+        val calNote: String,
+        /** Karede kullanilan zenit yonu (kamera ekseninde, kalibrasyon uygulanmis olabilir). */
+        val upUsedCam: DoubleArray,
+        val epochMs: Long
+    ) {
+        val tiltSigmaDeg: Double get() = Math.hypot(spreadDeg, systematicSigmaDeg)
+    }
+
+    /** Tek kare zenit hesabi (arka is parcacigi). @return (sonuc, basarisizlik nedeni) */
+    private fun computeZenith(
+        bitmap: Bitmap,
+        source: CaptureSource,
+        observationDateTime: LocalDateTime,
+        calibration: OrientationCalibration
+    ): Pair<ZenithComputation?, String> {
+        val locator = zenithLocator ?: return Pair(null, "katalog hazir degil")
+        if (calibration.note.contains("varsayim", ignoreCase = true)) {
+            return Pair(null, "egim verisi yok (Pitch/Roll elle girin)")
+        }
+        return try {
+            val stars = starDetector.detectStars(bitmap)
+            val useExactTime = source == CaptureSource.CAMERA && dateModeToday.isChecked && selectedCaptureEpochMs != null
+            val epochMs = if (useExactTime) selectedCaptureEpochMs!! else
+                observationDateTime.atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+            val timeSigma = if (useExactTime) 2.0 else 30.0
+            val fused = source == CaptureSource.CAMERA && selectedUpMeasured != null && calibration.note.contains("füzyonu")
+            val rot = selectedDisplayRotationDeg
+            val calibrated = fused && tiltCalibration.isCalibrated(rot)
+            val spread = if (fused) (selectedTiltSpreadDeg ?: 0.5f).toDouble() else 0.0
+            val sysSigma = when {
+                calibrated -> {
+                    val r = tiltCalibration.residualDeg(rot).let { if (it.isNaN()) 0.1 else it }
+                    Math.sqrt(0.05 * 0.05 + r * r / tiltCalibration.frameCount(rot))
+                }
+                fused -> 0.5
+                calibration.note.contains("Manuel") -> 1.0
+                calibration.note.contains("Ufuk") -> 1.5
+                else -> 2.0
+            }
+            val tiltSigma = Math.hypot(spread, sysSigma)
+            val calNote = if (calibrated) "Sensor kalibreli (${tiltCalibration.frameCount(rot)} kare)" else "Sensor KALIBRE DEGIL (KALIBRE ET onerilir)"
+            val upUsed = if (calibrated) tiltCalibration.correct(rot, selectedUpMeasured!!)
+                else ZenithFix.upFromTilt(calibration.pitchDeg.toDouble(), calibration.rollDeg.toDouble())
+            val out = if (calibrated) {
+                locator.locate(
+                    stars = stars, widthPx = bitmap.width, heightPx = bitmap.height,
+                    longSideFovDeg = horizontalFov.toDouble(),
+                    upCam = tiltCalibration.correct(rot, selectedUpMeasured!!),
+                    epochMillis = epochMs, tiltSigmaDeg = tiltSigma, timeSigmaSec = timeSigma
+                )
+            } else {
+                locator.locate(
+                    stars = stars, widthPx = bitmap.width, heightPx = bitmap.height,
+                    longSideFovDeg = horizontalFov.toDouble(),
+                    pitchDeg = calibration.pitchDeg.toDouble(), rollDeg = calibration.rollDeg.toDouble(),
+                    epochMillis = epochMs, tiltSigmaDeg = tiltSigma, timeSigmaSec = timeSigma
+                )
+            }
+            if (!out.ok) Pair(null, out.message) else Pair(ZenithComputation(out, spread, sysSigma, timeSigma, calNote, upUsed, epochMs), "ok")
+        } catch (e: Exception) {
+            Log.e(TAG, "Zenit hesabi hatasi", e)
+            Pair(null, "hata: ${e.message}")
+        }
+    }
+
+    /** @return (basarili, aciklama). Basariliysa sonuc ekrana yazilmis ve isleme durumu kapatilmistir. */
+    private fun tryZenithLocate(
+        bitmap: Bitmap,
+        source: CaptureSource,
+        observationDateTime: LocalDateTime,
+        calibration: OrientationCalibration
+    ): Pair<Boolean, String> {
+        val (comp, reason) = computeZenith(bitmap, source, observationDateTime, calibration)
+        if (comp == null) return Pair(false, reason)
+        val out = comp.out
+        val plate = out.plate!!
+        runOnUiThread {
+            resultTextView.text = String.format(
+                Locale.US,
+                "Konum: %.4f°%s %.4f°%s | tahmini hata ~%.0f km (%%68), ~%.0f km (%%95)",
+                abs(out.latitudeDeg), if (out.latitudeDeg >= 0) "K" else "G",
+                abs(out.longitudeDeg), if (out.longitudeDeg >= 0) "D" else "B",
+                out.errorKm68, out.errorKm95
+            )
+            infoTextView.text = String.format(
+                Locale.US,
+                "Zenit yontemi | Esleşen yildiz %d/%d (rms %.3f°) | Gorus acisi %.1f° | Kamera yuksekligi %.0f° | %s | Egim hatasi ±%.2f° | Saat hatasi ±%.0f sn",
+                plate.matchedStars, plate.usedStars, plate.rmsDeg, plate.longSideFovDeg, out.boresightAltitudeDeg,
+                calibration.note + " | " + comp.calNote, comp.tiltSigmaDeg, comp.timeSigmaSec
+            )
+            lastEstimatedLatitude = out.latitudeDeg
+            lastEstimatedLongitude = out.longitudeDeg
+            showMapButton.isEnabled = true
+            setProcessingState(false)
+        }
+        return Pair(true, "ok")
+    }
+
+    // ------------------------------------------------------------ seri cekim (dondurme)
+    // Ayni yerden, ayni egimle ama 4 farkli yone bakarak (x2 tur) cekilen karelerde sabit sensor sapmasi
+    // her karede dunya cercevesinde farkli yone doner; SwingSolver bunu konum dagilimindan kestirip giderir.
+
+    private var burstActive = false
+    private var burstWaiting = false
+    private var burstIndex = 0
+    private val burstTotal = 8
+    private val burstFrames = ArrayList<SwingFrame>()
+    private var burstSystematicSigma = 0.5
+    private var burstTimeSigma = 2.0
+    private var burstPlateRms = 0.02
+    private var burstLastNote = ""
+    private var burstLastCompassAz = 0.0
+    private var burstWaitStartMs = 0L
+
+    private fun angleDiffDeg(a: Double, b: Double): Double {
+        val d = Math.abs(a - b) % 360.0
+        return if (d > 180.0) 360.0 - d else d
+    }
+
+    /** CEK / otomatik cekim girisi: seri mod aciksa 8 kare (4 yon), degilse tek kare. */
+    private fun startCaptureSequence() {
+        if (burstActive) { finishBurst(); return }
+        if (::burstSwitch.isInitialized && burstSwitch.isChecked && zenithLocator != null) {
+            burstActive = true; burstWaiting = false; burstIndex = 0; burstFrames.clear()
+            burstLastNote = ""
+            resultTextView.text = "Seri cekim basladi: telefonu sabit tutun (0/$burstTotal)"
+        } else {
+            burstActive = false
+        }
+        takePhotoForSelection()
+    }
+
+    /** UI is parcacigi: bir kare cekildi (setSelectedPhoto yapildi). */
+    private fun onBurstFrameCaptured() {
+        val bitmap = selectedBitmap
+        val dt = resolveObservationDateTime(CaptureSource.CAMERA)
+        burstLastCompassAz = selectedCameraAzimuthDeg?.toDouble() ?: 0.0
+        if (bitmap == null || dt == null) { burstFrameDone(null); return }
+        val calibration = resolveOrientationCalibration(CaptureSource.CAMERA, bitmap.height, verticalFov, hemisphereMode)
+        resultTextView.text = "Seri cekim: kare ${burstIndex + 1}/$burstTotal isleniyor…"
+        cameraExecutor.execute {
+            val (comp, reason) = computeZenith(bitmap, CaptureSource.CAMERA, dt, calibration)
+            if (comp == null) burstLastNote = reason
+            runOnUiThread { burstFrameDone(comp) }
+        }
+    }
+
+    /** UI is parcacigi: bir kare bitti (basarili ya da degil). */
+    private fun burstFrameDone(comp: ZenithComputation?) {
+        if (comp != null) {
+            val plate = comp.out.plate!!
+            burstFrames.add(SwingFrame(plate.celFromCam, comp.upUsedCam, comp.epochMs, Math.max(comp.spreadDeg, 0.03)))
+            burstSystematicSigma = comp.systematicSigmaDeg
+            burstTimeSigma = comp.timeSigmaSec
+            burstPlateRms = plate.rmsDeg
+            burstLastNote = comp.calNote
+        }
+        burstIndex++
+        val abortEarly = burstIndex >= 3 && burstFrames.isEmpty()
+        if (burstIndex < burstTotal && !abortEarly) {
+            // Sonraki kare: kullanici telefonu ayni egimle ~90° dondurup sabitleyince otomatik cekilir.
+            burstWaiting = true
+            burstWaitStartMs = android.os.SystemClock.elapsedRealtime()
+            aimGuide.reset()
+            setProcessingState(false)
+            captureButton.isEnabled = true
+            captureButton.text = "BITIR ($burstIndex/$burstTotal)"
+            resultTextView.text = "Kare $burstIndex/$burstTotal tamam. Telefonu AYNI egimle ~90° yana dondurup sabit tutun (otomatik cekilir; BITIR ile erken bitirin)"
+        } else {
+            finishBurst()
+        }
+    }
+
+    private fun finishBurst() {
+        burstActive = false
+        burstWaiting = false
+        captureButton.text = "CEK"
+        setProcessingState(false)
+        val res = SwingSolver.solve(burstFrames)
+        if (res == null) {
+            resultTextView.text = "Seri cekim: hicbir karede yildiz cozumu yok ($burstLastNote)"
+            return
+        }
+        val tiltSigma = if (res.observable) res.tiltSigmaDeg else Math.hypot(res.tiltSigmaDeg, burstSystematicSigma)
+        val (e68, e95) = ZenithLocator.estimateErrorKm(res.latitudeDeg, tiltSigma, burstTimeSigma, burstPlateRms)
+        resultTextView.text = String.format(
+            Locale.US,
+            "Konum: %.4f°%s %.4f°%s | tahmini hata ~%.0f km (%%68), ~%.0f km (%%95)",
+            abs(res.latitudeDeg), if (res.latitudeDeg >= 0) "K" else "G",
+            abs(res.longitudeDeg), if (res.longitudeDeg >= 0) "D" else "B",
+            e68, e95
+        )
+        val swingNote = if (res.observable) {
+            String.format(Locale.US, "yon dengesi %.2f, sensor sapmasi giderildi (~%.2f°)", res.azimuthBalance, res.offsetDeg)
+        } else {
+            "UYARI: kareler yeterince farkli yone bakmiyor (denge %.2f), sensor sapmasi giderilemedi; telefonu her karede ~90° dondurun".format(Locale.US, res.azimuthBalance)
+        }
+        infoTextView.text = String.format(
+            Locale.US,
+            "Zenit yontemi, seri cekim: %d kare | %s | kareler arasi yayilma %.1f → %.1f km | Egim belirsizligi ±%.2f° | %s",
+            res.framesUsed, swingNote, res.scatterBeforeKm, res.scatterAfterKm, tiltSigma, burstLastNote
+        )
+        lastEstimatedLatitude = res.latitudeDeg
+        lastEstimatedLongitude = res.longitudeDeg
+        showMapButton.isEnabled = true
     }
 
     private fun processBitmap(
@@ -747,7 +1280,7 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 val hemisphereLabel = if (result.latitude >= 0f) "K" else "G"
                 val sourceLabel = if (source == CaptureSource.CAMERA) "KAMERA" else "GALERI"
-                val estimatedLongitude = calculateLongitudeFromUtcTime(observationDateTime)
+                val estimatedLongitude = estimateLongitudeFromTimeZone(observationDateTime)
                 val constellation = constellationLabel(
                     patternName = patternResult.matchedPattern,
                     mode = hemisphereMode,
@@ -757,7 +1290,7 @@ class MainActivity : AppCompatActivity() {
             val modeTag = if (preferPlateSolve && plateSolveOk) "PlateSolve" else if (useOfflinePlate) "Offline-Fallback" else "Klasik"
                 resultTextView.text = String.format(
                     Locale.US,
-                    "%s | Enlem %.4fÂ°%s | Hata +/-%.2fÂ° | Guven %.2f",
+                    "%s | Enlem %.4f°%s | Hata +/-%.2f° | Guven %.2f",
                     modeName,
                     abs(result.latitude),
                     hemisphereLabel,
@@ -887,7 +1420,7 @@ class MainActivity : AppCompatActivity() {
             horizonPitch != null && manualRoll != null -> "Pitch: Ufuk, Roll: Manuel"
             horizonPitch != null && horizonPercentRaw == null -> "Pitch: Ufuk (otomatik)"
             horizonPitch != null -> "Pitch: Ufuk"
-            source == CaptureSource.CAMERA -> "Pitch/Roll: Sensor"
+            source == CaptureSource.CAMERA -> selectedTiltLabel ?: "Pitch/Roll: Sensor"
             else -> "Pitch/Roll: Otomatik varsayim (0/0)"
         }
         return OrientationCalibration(
@@ -939,6 +1472,7 @@ class MainActivity : AppCompatActivity() {
         isProcessing = processing
         captureButton.isEnabled = !processing && imageCapture != null
         galleryButton.isEnabled = !processing
+        if (::calibrateButton.isInitialized) calibrateButton.isEnabled = !processing
         modeButton.isEnabled = !processing
         showMapButton.isEnabled = !processing && lastEstimatedLatitude != null && lastEstimatedLongitude != null
         dateModeToday.isEnabled = !processing
@@ -1003,12 +1537,17 @@ class MainActivity : AppCompatActivity() {
         MiniMapView.showFullscreenMap(this, markers, label)
     }
 
-    private fun calculateLongitudeFromUtcTime(dateTime: LocalDateTime): Double {
-        val totalMinutes = dateTime.hour * 60.0 + dateTime.minute.toDouble()
-        var longitude = (totalMinutes - 720.0) * (360.0 / 1440.0)
-        if (longitude > 180.0) longitude -= 360.0
-        if (longitude < -180.0) longitude += 360.0
-        return longitude
+    /**
+     * Boylam, cihazin saat diliminin STANDART ofsetinden (15 derece / saat) tahmin edilir.
+     *
+     * Eski kod gun ici saati dogrudan boylama ceviriyordu (ornegin Istanbul'da 22:00 -> 180 derece);
+     * ustelik `observationDateTime` UTC degil yerel saattir. Saat dilimi tabanli tahmin
+     * yaklasik +/-7.5 derece (yaz saati uygulamasi dikkate alinmaz) dogruluktadir.
+     */
+    private fun estimateLongitudeFromTimeZone(dateTime: LocalDateTime): Double {
+        val zone = java.time.ZoneId.systemDefault()
+        val offsetSeconds = zone.rules.getStandardOffset(dateTime.atZone(zone).toInstant()).totalSeconds
+        return (offsetSeconds / 3600.0 * 15.0).coerceIn(-180.0, 180.0)
     }
 
     private fun nearestStation(latitude: Double, longitude: Double): PolarStation? {
@@ -1234,6 +1773,33 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun imageToBitmap(image: ImageProxy): Bitmap {
+        // ImageCapture.takePicture(OnImageCapturedCallback) varsayilan olarak JPEG dondurur
+        // (tek plane, sikistirilmis bayt). Onu YUV Y-duzlemi gibi okumak bozuk goruntu /
+        // IndexOutOfBounds uretiyordu; JPEG ise BitmapFactory ile coz.
+        if (image.format == ImageFormat.JPEG && image.planes.size == 1) {
+            val buffer = image.planes[0].buffer
+            buffer.rewind()
+            val bytes = ByteArray(buffer.remaining())
+            buffer.get(bytes)
+
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            var sample = 1
+            var w = bounds.outWidth
+            var h = bounds.outHeight
+            while (w > MAX_DECODE_PX || h > MAX_DECODE_PX) {
+                w /= 2
+                h /= 2
+                sample *= 2
+            }
+            val opts = BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+            return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                ?: throw IllegalStateException("JPEG cozulemedi")
+        }
+
         val yPlane = image.planes[0]
         val yBuffer = yPlane.buffer
         val yRowStride = yPlane.rowStride
@@ -1272,7 +1838,7 @@ class MainActivity : AppCompatActivity() {
         var sample = 1
         var w = bounds.outWidth
         var h = bounds.outHeight
-        while (w > 1600 || h > 1600) {
+        while (w > MAX_DECODE_PX || h > MAX_DECODE_PX) {
             w /= 2
             h /= 2
             sample *= 2

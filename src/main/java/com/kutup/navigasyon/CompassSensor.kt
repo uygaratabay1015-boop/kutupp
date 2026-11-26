@@ -5,7 +5,9 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.os.Build
 import android.view.Surface
+import android.view.WindowManager
 
 /**
  * Gercek pusula + cihaz egimi (pitch/roll) verisi.
@@ -114,8 +116,25 @@ class CompassSensor(private val context: Context) : SensorEventListener {
         return (prev + alpha * delta).normalize360()
     }
 
+    // Context.getDisplay() yalnizca API 30+ var; minSdk 26 oldugu icin eski surumlerde
+    // NoSuchMethodError ile coker, ayrica Activity olmayan context'te API 30+ da
+    // UnsupportedOperationException firlatabilir.
+    private fun currentDisplayRotation(): Int {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                context.display?.rotation ?: Surface.ROTATION_0
+            } else {
+                @Suppress("DEPRECATION")
+                (context.getSystemService(Context.WINDOW_SERVICE) as WindowManager)
+                    .defaultDisplay.rotation
+            }
+        } catch (_: Exception) {
+            Surface.ROTATION_0
+        }
+    }
+
     private fun remapAxesForDisplay(): Pair<Int, Int> {
-        val rotation = context.display?.rotation ?: Surface.ROTATION_0
+        val rotation = currentDisplayRotation()
         return when (rotation) {
             Surface.ROTATION_90 -> Pair(SensorManager.AXIS_Y, SensorManager.AXIS_MINUS_X)
             Surface.ROTATION_180 -> Pair(SensorManager.AXIS_MINUS_X, SensorManager.AXIS_MINUS_Y)

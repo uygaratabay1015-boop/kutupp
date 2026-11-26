@@ -1,7 +1,7 @@
 package com.kutup.navigasyon
 
 import kotlin.math.abs
-import kotlin.math.atan
+import kotlin.math.asin
 import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.pow
@@ -134,10 +134,15 @@ class LatitudeSolver {
 
         val rollRad = Math.toRadians(cameraRollDeg.toDouble())
         val upComponent = (ny * cos(rollRad) - nx * sin(rollRad)).toFloat()
+        val rightComponent = (nx * cos(rollRad) + ny * sin(rollRad)).toFloat()
 
-        // Astrometry.net benzeri gnomonik mantik: goruntu duzleminden isina gecip aciyi atan ile hesapla.
-        val upAngleDeg = Math.toDegrees(atan(upComponent.toDouble())).toFloat()
-        val apparentAltitude = cameraPitchDeg + upAngleDeg
+        // Tam 3B gnomonik donusum: (sag, yukari, 1) isini pitch kadar yukari cevirip
+        // ufuk ustu yuksekligi asin ile hesapla. Eski "pitch + atan(yukari)" yaklasimi
+        // sadece goruntu merkez dikeyinde dogruydu; yatay ofsette birkac derece sapiyordu.
+        val pitchRad = Math.toRadians(cameraPitchDeg.toDouble())
+        val rayNorm = sqrt((rightComponent * rightComponent + upComponent * upComponent + 1f).toDouble())
+        val sinAltitude = ((upComponent * cos(pitchRad) + sin(pitchRad)) / rayNorm).coerceIn(-1.0, 1.0)
+        val apparentAltitude = Math.toDegrees(asin(sinAltitude)).toFloat()
 
         val refraction = atmosphericRefractionDegrees(apparentAltitude)
         val correctedAltitude = apparentAltitude - refraction

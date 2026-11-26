@@ -26,10 +26,20 @@ class CameraModel:
         nx = (x - cx) / max(1e-9, fx)
         ny = (cy - y) / max(1e-9, fy)
 
+        # Roll: goruntu duzleminde donus; yukari bileseni (ny') hesapla.
         roll = math.radians(self.roll_deg)
         up_component = ny * math.cos(roll) - nx * math.sin(roll)
+        right_component = nx * math.cos(roll) + ny * math.sin(roll)
 
-        apparent_alt = self.pitch_deg + math.degrees(math.atan(up_component))
+        # Tam 3B donusum: kamera ekseni (nx', ny', 1) isinini pitch kadar yukari
+        # cevirdikten sonra ufuk ustu yukseklik (elevation) hesaplanir.
+        # Eski "pitch + atan(ny)" yaklasimi sadece goruntu merkez dikeyindeki
+        # noktalar icin dogruydu; yatayda ofset oldugunda birkac derece sapiyordu.
+        pitch = math.radians(self.pitch_deg)
+        norm = math.sqrt(right_component * right_component + up_component * up_component + 1.0)
+        sin_alt = (up_component * math.cos(pitch) + math.sin(pitch)) / norm
+        sin_alt = max(-1.0, min(1.0, sin_alt))
+        apparent_alt = math.degrees(math.asin(sin_alt))
         return apparent_alt - _atmospheric_refraction_deg(apparent_alt)
 
 
