@@ -648,15 +648,14 @@ class MainActivity : AppCompatActivity() {
         val prefs = getSharedPreferences("kutup_prefs", MODE_PRIVATE)
         if (prefs.getBoolean("howto_seen", false)) return
         AlertDialog.Builder(this)
-            .setTitle("Nasil cekilir?")
+            .setTitle("Nasil kullanilir?")
             .setMessage(
-                "1) Telefonu acik gokyuzune cevirin; ekrandaki yesil aralikta tutun (genelde yaklasik 55°-75°, kameraya gore otomatik ayarlanir).\n" +
-                "2) Beyaz cizgiler ile hareketli cizgiyi ust uste getirin (telefon yana yatik olmasin).\n" +
-                "3) Mumkunse tripod kullanin veya telefonu bir yere dayayin; elde tutarken kolunuzu govdenize yaslayin.\n" +
-                "4) Halka dolup 'Hazir!' yazinca cekin. Her kare ~3 sn pozlanir: pozlama bitene kadar telefonu hic oynatmayin, ekrana dokunmayin.\n" +
-                "5) Seri cekimde (12 kare) her karede telefonu AYNI egimle ~90° yana dondurun: boylece sensor sapmasi kendiliginden giderilir.\n" +
-                "6) Saatin ve saat diliminin dogru oldugundan emin olun.\n\n" +
-                "Not: 1° egim hatasi yaklasik 111 km konum hatasi demektir; sabit tutmak cok onemli."
+                "1) Acik gokyuzune bakin, telefonu ekrandaki yesil aralikta tutun.\n" +
+                "2) Cizgi yatay, halka dolu olunca 'KONUMU BUL' tusuna basin.\n" +
+                "3) Telefonu sabit tutun (tripod ya da bir yere dayayin).\n" +
+                "4) Uygulama 12 kare ceker: her karede telefonu ayni egimle yana ~90° cevirin. Erken bitirmek icin BITIR.\n" +
+                "5) Sonuc ekranin altinda gorunur. Telefon saati otomatik (ag) olmali.\n\n" +
+                "Ince ayarlar 'Gelismis ayarlar' altindadir."
             )
             .setPositiveButton("Anladim") { _, _ -> prefs.edit().putBoolean("howto_seen", true).apply() }
             .show()
@@ -740,7 +739,8 @@ class MainActivity : AppCompatActivity() {
                                 } else {
                                     setProcessingState(false)
                                     resetCameraSession()
-                                    Toast.makeText(this@MainActivity, "Foto cekildi. HESAPLA'ya bas.", Toast.LENGTH_SHORT).show()
+                                    resultTextView.text = "Fotograf cekildi, konum hesaplaniyor…"
+                                    onCalculatePressed()
                                 }
                             }
                         } catch (e: Exception) {
@@ -926,7 +926,7 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread {
             resultTextView.text = String.format(
                 Locale.US,
-                "Konum: %.4f°%s %.4f°%s | tahmini hata ~%.0f km (%%68), ~%.0f km (%%95)",
+                "KONUMUNUZ\n%.4f°%s  %.4f°%s\nTahmini hata: ~%.0f km (%%95: ~%.0f km)",
                 abs(out.latitudeDeg), if (out.latitudeDeg >= 0) "K" else "G",
                 abs(out.longitudeDeg), if (out.longitudeDeg >= 0) "D" else "B",
                 out.errorKm68, out.errorKm95
@@ -1062,7 +1062,7 @@ class MainActivity : AppCompatActivity() {
     private fun finishBurst() {
         burstActive = false
         burstWaiting = false
-        captureButton.text = "CEK"
+        captureButton.text = "KONUMU BUL (CEK)"
         setProcessingState(false)
         resetCameraSession()
         val res = SwingSolver.solve(burstFrames)
@@ -1074,7 +1074,7 @@ class MainActivity : AppCompatActivity() {
         val (e68, e95) = ZenithLocator.estimateErrorKm(res.latitudeDeg, tiltSigma, burstTimeSigma, burstPlateRms)
         resultTextView.text = String.format(
             Locale.US,
-            "Konum: %.4f°%s %.4f°%s | tahmini hata ~%.0f km (%%68), ~%.0f km (%%95)",
+            "KONUMUNUZ\n%.4f°%s  %.4f°%s\nTahmini hata: ~%.0f km (%%95: ~%.0f km)",
             abs(res.latitudeDeg), if (res.latitudeDeg >= 0) "K" else "G",
             abs(res.longitudeDeg), if (res.longitudeDeg >= 0) "D" else "B",
             e68, e95
