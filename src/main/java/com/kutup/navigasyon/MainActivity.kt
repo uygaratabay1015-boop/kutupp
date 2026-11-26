@@ -11,6 +11,7 @@ import android.graphics.ImageFormat
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CaptureRequest
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -32,6 +33,8 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
@@ -58,6 +61,7 @@ import kotlin.math.atan
 import kotlin.math.hypot
 import kotlin.math.pow
 
+@kotlin.OptIn(ExperimentalCamera2Interop::class)
 class MainActivity : AppCompatActivity() {
 
     enum class Hemisphere { NORTH, SOUTH }
@@ -83,6 +87,10 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "KutupNav"
         private const val MIN_TILT_QUALITY = 0.15f
+        private const val TARGET_EXPOSURE_NS = 3_000_000_000L
+        private const val TARGET_ISO = 1600
+        private const val MAX_DECODE_PX = 2600
+        private const val MIN_USEFUL_EXPOSURE_NS = 500_000_000L
         private const val SHAKY_TILT_SPREAD_DEG = 1.0f
         private const val REQUEST_CODE_PERMISSIONS = 10
         private val REQUIRED_PERMISSIONS = arrayOf(Manifest.permission.CAMERA)
@@ -118,7 +126,7 @@ class MainActivity : AppCompatActivity() {
     private val aimTick = object : Runnable {
         override fun run() {
             if (::tiltSensor.isInitialized && ::aimGuideView.isInitialized) {
-                val tilt = tiltSensor.estimateForCapture(previewView.display?.rotation ?: android.view.Surface.ROTATION_0, 0.7)
+                val tilt = tiltSensor.estimateForCapture(previewView.display?.rotation ?: android.view.Surface.ROTATION_0, Math.max(0.7, nightExposureNs / 1e9))
                 val aimState = aimGuide.evaluate(tilt, android.os.SystemClock.elapsedRealtime())
                 aimGuideView.update(aimState)
                 val nowMs = android.os.SystemClock.elapsedRealtime()
@@ -421,6 +429,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // --- gece cekimi: telefonun otomatik (kisa pozlu, gurultu azaltmali, dusuk cozunurluklu) cekimi yildizlari yok eder.
+    private var nightExposureNs: Long = 0L          // 0: manuel pozlama uygulanmadi
+    private var nightIso: Int = 0
+    private var cameraTimestampRealtime = false
+
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
         cameraProviderFuture.addListener({
@@ -430,15 +443,25 @@ class MainActivity : AppCompatActivity() {
                 it.setSurfaceProvider(previewView.surfaceProvider)
             }
 
-            imageCapture = ImageCapture.Builder()
-                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                .setTargetResolution(Size(1280, 720))
+            // 1) Kamera ozelliklerini (poz/ISO araligi) okumak icin once varsayilanla bagla
+            val probe = ImageCapture.Builder()
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                .setTargetResolution(Size(4032, 3024))
                 .build()
 
             try {
                 cameraProvider.unbindAll()
-                camera = cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture)
+                camera = cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, probe)
+                imageCapture = probe
                 updateVerticalFovFromCamera(camera)
+
+                // 2) Gece ayarli (manuel uzun pozlama, sonsuz odak, minimum gurultu azaltma) ImageCapture ile yeniden bagla
+                val night = camera?.let { buildNightImageCapture(it) }
+                if (night != null) {
+                    cameraProvider.unbindAll()
+                    camera = cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, night)
+                    imageCapture = night
+                }
                 captureButton.isEnabled = true
                 updateCalculateButton()
             } catch (exc: Exception) {
@@ -447,6 +470,46 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Kamera baslatilamadi", Toast.LENGTH_SHORT).show()
             }
         }, ContextCompat.getMainExecutor(this))
+    }
+
+    /**
+     * Yildiz icin: yuksek cozunurluk, manuel poz (<= ~3 sn: yildiz izi ~1 piksel), orta ISO, sonsuza odak,
+     * minimum gurultu azaltma/keskinlestirme, OIS kapali. Telefon bunlari desteklemiyorsa null (varsayilan cekim).
+     */
+    private fun buildNightImageCapture(cam: Camera): ImageCapture? {
+        return try {
+            val c2 = Camera2CameraInfo.from(cam.cameraInfo)
+            val expRange = c2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+            val isoRange = c2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+            val tsSource = c2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)
+            cameraTimestampRealtime = tsSource == CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
+            if (expRange == null || isoRange == null) return null
+            val exposure = TARGET_EXPOSURE_NS.coerceIn(expRange.lower, expRange.upper)
+            val iso = TARGET_ISO.coerceIn(isoRange.lower, isoRange.upper)
+            val builder = ImageCapture.Builder()
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                .setTargetResolution(Size(4032, 3024))
+                .setJpegQuality(100)
+            val ext = Camera2Interop.Extender(builder)
+            ext.setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+            ext.setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, exposure)
+            ext.setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, iso)
+            ext.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+            ext.setCaptureRequestOption(CaptureRequest.LENS_FOCUS_DISTANCE, 0f)
+            ext.setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_MINIMAL)
+            ext.setCaptureRequestOption(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF)
+            ext.setCaptureRequestOption(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
+            nightExposureNs = exposure
+            nightIso = iso
+            if (exposure < MIN_USEFUL_EXPOSURE_NS) {
+                Toast.makeText(this, "Bu telefon uzun pozlamayi desteklemiyor (en fazla %.2f sn): az yildiz gorunebilir".format(exposure / 1e9), Toast.LENGTH_LONG).show()
+            }
+            builder.build()
+        } catch (e: Exception) {
+            Log.w(TAG, "Gece cekim ayarlari uygulanamadi, varsayilan kullaniliyor", e)
+            nightExposureNs = 0L
+            null
+        }
     }
 
     private fun updateVerticalFovFromCamera(cam: Camera?) {
@@ -553,7 +616,7 @@ class MainActivity : AppCompatActivity() {
                 "1) Telefonu acik gokyuzune cevirin; ekrandaki yesil aralikta tutun (genelde yaklasik 55°-75°, kameraya gore otomatik ayarlanir).\n" +
                 "2) Beyaz cizgiler ile hareketli cizgiyi ust uste getirin (telefon yana yatik olmasin).\n" +
                 "3) Mumkunse tripod kullanin veya telefonu bir yere dayayin; elde tutarken kolunuzu govdenize yaslayin.\n" +
-                "4) Halka dolup 'Hazir!' yazinca cekin; cekim sirasinda telefona dokunup sarsmayin.\n" +
+                "4) Halka dolup 'Hazir!' yazinca cekin. Her kare ~3 sn pozlanir: pozlama bitene kadar telefonu hic oynatmayin, ekrana dokunmayin.\n" +
                 "5) Seri cekimde (8 kare) her karede telefonu AYNI egimle ~90° yana dondurun: boylece sensor sapmasi kendiliginden giderilir.\n" +
                 "6) Saatin ve saat diliminin dogru oldugundan emin olun.\n\n" +
                 "Not: 1° egim hatasi yaklasik 111 km konum hatasi demektir; sabit tutmak cok onemli."
@@ -575,14 +638,26 @@ class MainActivity : AppCompatActivity() {
             object : ImageCapture.OnImageCapturedCallback() {
                 override fun onCaptureSuccess(image: ImageProxy) {
                     // Sensor penceresi cekim anina ait: once (ana is parcacigi) hesaplanir.
-                    val tilt = tiltSensor.estimateForCapture(localImageCapture.targetRotation)
+                    // Pozlama penceresi (sensor zaman tabaninda) + ortasindaki gercek saat; yoksa son 1-3 sn ve "simdi".
+                    val nowNs = android.os.SystemClock.elapsedRealtimeNanos()
+                    val expNs = nightExposureNs
+                    val startNs = image.imageInfo.timestamp
+                    val timestampOk = expNs > 0L && cameraTimestampRealtime && nowNs - startNs in 0L..30_000_000_000L
+                    val tilt: CameraTilt?
+                    val captureEpochMs: Long
+                    if (timestampOk) {
+                        tilt = tiltSensor.estimateForWindow(localImageCapture.targetRotation, startNs, startNs + expNs)
+                        captureEpochMs = System.currentTimeMillis() - (nowNs - startNs) / 1_000_000L + expNs / 2_000_000L
+                    } else {
+                        tilt = tiltSensor.estimateForCapture(localImageCapture.targetRotation, Math.max(1.0, expNs / 1e9))
+                        captureEpochMs = System.currentTimeMillis() - (if (expNs > 0L) expNs / 2_000_000L + 300L else 0L)
+                    }
                     val useTilt = tilt != null && tilt.quality >= MIN_TILT_QUALITY
                     if (tilt != null && tilt.spreadDeg > SHAKY_TILT_SPREAD_DEG) {
                         Toast.makeText(this@MainActivity, "Telefon titredi (±%.1f°). Sabit tutup tekrar cekin.".format(tilt.spreadDeg), Toast.LENGTH_LONG).show()
                     }
                     val capturePitch = if (useTilt) tilt!!.pitchDeg else compass.getPitchDegrees()
                     val captureRoll = if (useTilt) tilt!!.rollDeg else compass.getRollDegrees()
-                    val captureEpochMs = System.currentTimeMillis()
                     val captureRotationDeg = TiltEstimator.surfaceRotationToDegrees(localImageCapture.targetRotation)
                     val upMeasured = if (useTilt) ZenithFix.upFromTilt(capturePitch.toDouble(), captureRoll.toDouble()) else null
                     val tiltSpread = if (useTilt) tilt!!.spreadDeg else null
@@ -1686,7 +1761,7 @@ class MainActivity : AppCompatActivity() {
             var sample = 1
             var w = bounds.outWidth
             var h = bounds.outHeight
-            while (w > 1600 || h > 1600) {
+            while (w > MAX_DECODE_PX || h > MAX_DECODE_PX) {
                 w /= 2
                 h /= 2
                 sample *= 2
@@ -1737,7 +1812,7 @@ class MainActivity : AppCompatActivity() {
         var sample = 1
         var w = bounds.outWidth
         var h = bounds.outHeight
-        while (w > 1600 || h > 1600) {
+        while (w > MAX_DECODE_PX || h > MAX_DECODE_PX) {
             w /= 2
             h /= 2
             sample *= 2

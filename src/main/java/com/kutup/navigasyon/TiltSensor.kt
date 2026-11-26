@@ -75,6 +75,20 @@ class TiltSensor(context: Context) : SensorEventListener {
      */
     fun estimateForCapture(surfaceRotation: Int, windowSeconds: Double = 1.0): CameraTilt? {
         val est = synchronized(lock) { estimator.estimateLatest(windowSeconds) } ?: return null
+        return toCameraTilt(est, surfaceRotation)
+    }
+
+    /**
+     * Pozlama penceresinin (SensorEvent ile ayni zaman tabani: elapsedRealtimeNanos) agirlikli ortalamasi.
+     * [startNs]..[endNs] = pozlamanin baslangic/bitis zamani.
+     */
+    fun estimateForWindow(surfaceRotation: Int, startNs: Long, endNs: Long): CameraTilt? {
+        val seconds = ((endNs - startNs) / 1e9).coerceIn(0.2, 14.0)
+        val est = synchronized(lock) { estimator.estimate(endNs, seconds) } ?: return null
+        return toCameraTilt(est, surfaceRotation)
+    }
+
+    private fun toCameraTilt(est: TiltEstimate, surfaceRotation: Int): CameraTilt {
         val upCam = TiltEstimator.upInCamera(est.upDevice, TiltEstimator.surfaceRotationToDegrees(surfaceRotation))
         val (pitch, roll) = TiltEstimator.pitchRollFromCameraUp(upCam)
         return CameraTilt(
