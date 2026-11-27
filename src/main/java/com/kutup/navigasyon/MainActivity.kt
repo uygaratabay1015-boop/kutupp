@@ -305,6 +305,18 @@ class MainActivity : AppCompatActivity() {
             true
         }
         aimGuideView.setGuide(aimGuide)
+        dayNightButton = findViewById(R.id.dayNightButton)
+        sunResetButton = findViewById(R.id.sunResetButton)
+        dayNightButton.setOnClickListener {
+            if (burstActive) { Toast.makeText(this, "Seri cekim surerken mod degistirilemez", Toast.LENGTH_SHORT).show() }
+            else { dayMode = !dayMode; applyDayNightUi() }
+        }
+        sunResetButton.setOnClickListener {
+            sunSightings.clear(); saveSunSightings()
+            if (dayMode) resultTextView.text = "Gunes olcumleri silindi. Yeni olcum icin KONUMU BUL'a basin."
+            Toast.makeText(this, "Gunes olcumleri sifirlandi", Toast.LENGTH_SHORT).show()
+        }
+        loadSunSightings()
         showHowToShootOnce()
         controlPanel = findViewById(R.id.controlPanel)
         togglePanelButton = findViewById(R.id.togglePanelButton)
@@ -478,6 +490,7 @@ class MainActivity : AppCompatActivity() {
                 updateVerticalFovFromCamera(camera)
                 // Manuel pozlama YALNIZCA cekim aninda uygulanir (onizleme otomatik kalir; yoksa gunduz/gece onizleme bozulur).
                 nightOptions = camera?.let { buildNightOptions(it) }
+                sunOptions = camera?.let { buildSunOptions(it) }
                 captureButton.isEnabled = true
                 updateCalculateButton()
             } catch (exc: Exception) {
@@ -526,7 +539,7 @@ class MainActivity : AppCompatActivity() {
 
     /** Cekim bitince onizlemeyi otomatik pozlamaya geri al. */
     private fun restoreAutoExposure() {
-        if (nightOptions == null) return
+        if (nightOptions == null && sunOptions == null) return
         try {
             camera?.let {
                 val c2 = Camera2CameraControl.from(it.cameraControl)
@@ -546,7 +559,7 @@ class MainActivity : AppCompatActivity() {
 
     /** Manuel pozlama sonrasi onizleme beyaz kalmasin diye kamera oturumunu temiz yeniden kurar. */
     private fun resetCameraSession() {
-        if (nightOptions == null) return
+        if (nightOptions == null && sunOptions == null) return
         restoreAutoExposure()
         aimHandler.postDelayed({ if (!isDestroyed && !burstActive) startCamera() }, 400L)
     }
@@ -572,6 +585,133 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             Log.w(TAG, "Kamera FOV metadata okunamadi, varsayilan 60 derece kullaniliyor", e)
         }
+    }
+
+    // ------------------------------------------------------------------ gunduz (Gunes) modu
+    private lateinit var dayNightButton: Button
+    private lateinit var sunResetButton: Button
+    private var dayMode = false
+    private var sunOptions: CaptureRequestOptions? = null
+    private var sunExposureNs = 0L
+    private val sunSightings = ArrayList<SunSighting>()
+
+    /** Gunes icin cok kisa pozlama + en dusuk ISO: doymus cekirdek net, hale kucuk. Desteklenmezse null. */
+    private fun buildSunOptions(cam: Camera): CaptureRequestOptions? {
+        return try {
+            val c2 = Camera2CameraInfo.from(cam.cameraInfo)
+            val expRange = c2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+            val isoRange = c2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+            val tsSource = c2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)
+            cameraTimestampRealtime = tsSource == CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
+            if (expRange == null || isoRange == null) return null
+            val exposure = 40_000L.coerceIn(expRange.lower, expRange.upper)
+            sunExposureNs = exposure
+            CaptureRequestOptions.Builder()
+                .setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                .setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, exposure)
+                .setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, isoRange.lower)
+                .setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_MINIMAL)
+                .setCaptureRequestOption(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF)
+                .build()
+        } catch (e: Exception) {
+            Log.w(TAG, "Gunes cekim ayarlari uygulanamadi", e)
+            sunExposureNs = 0L
+            null
+        }
+    }
+
+    private fun applyDayNightUi() {
+        aimGuide.setSunMode(dayMode)
+        if (dayMode) {
+            dayNightButton.text = "MOD: GUNDUZ (Gunes) - degistirmek icin dokun"
+            captureButton.text = "GUNES OLCUMU AL"
+            resultTextView.text = if (sunSightings.isEmpty())
+                "GUNDUZ MODU\nGunese dogrultun, Gunes ekranin ortasinda olsun, sabit tutup olcum alin. En az 2 olcum gerekir: aralarinda 1-3 saat olursa en iyi sonuc."
+            else sunResultText("")
+        } else {
+            dayNightButton.text = "MOD: GECE (yildiz) - degistirmek icin dokun"
+            captureButton.text = "KONUMU BUL (CEK)"
+            resultTextView.text = "Gece modu: acik gokyuzune dogrultup KONUMU BUL'a basin."
+        }
+    }
+
+    private fun saveSunSightings() {
+        val s = sunSightings.joinToString("\n") { "${it.epochMs},${it.zenithDeg},${it.sigmaDeg},${it.azimuthHintDeg ?: Double.NaN}" }
+        getSharedPreferences("kutup_prefs", MODE_PRIVATE).edit().putString("sun_sightings", s).apply()
+    }
+
+    private fun loadSunSightings() {
+        sunSightings.clear()
+        val raw = getSharedPreferences("kutup_prefs", MODE_PRIVATE).getString("sun_sightings", "") ?: ""
+        val now = System.currentTimeMillis()
+        for (line in raw.lines()) {
+            val p = line.split(",")
+            if (p.size < 4) continue
+            try {
+                val t = p[0].toLong()
+                if (now - t > 24L * 3600_000L) continue
+                sunSightings.add(SunSighting(t, p[1].toDouble(), p[2].toDouble(), p[3].toDouble().takeIf { !it.isNaN() }))
+            } catch (e: Exception) { /* bozuk satiri atla */ }
+        }
+    }
+
+    private fun sunResultText(note: String): String {
+        val n = sunSightings.size
+        if (n < 2) return "Gunes olcumu $n/2 kaydedildi. $note\nIkinci olcumu en az ~20 dk, tercihen 1-3 saat sonra alin (Gunesin yonu degismeli)."
+        val fix = SunSolver.solve(sunSightings) ?: return "Konum hesaplanamadi"
+        val span = (sunSightings.maxOf { it.epochMs } - sunSightings.minOf { it.epochMs }) / 60000L
+        val sb = StringBuilder()
+        sb.append(String.format(Locale.US, "KONUMUNUZ (GUNES, %d olcum)\n%.4f°%s  %.4f°%s\nTahmini hata: ~%.0f km",
+            n, abs(fix.latDeg), if (fix.latDeg >= 0) "K" else "G", abs(fix.lonDeg), if (fix.lonDeg >= 0) "D" else "B", fix.errorKm68))
+        if (fix.ambiguous && fix.altLatDeg != null && fix.altLonDeg != null) {
+            sb.append(String.format(Locale.US, "\nDIKKAT: iki olasi konum var. Digeri: %.2f°, %.2f°. Hangisi dogruysa onu secin ya da 3. bir olcum alin.", fix.altLatDeg, fix.altLonDeg))
+        }
+        if (span < 20) sb.append("\nOlcumler arasi sure kisa (${span} dk): hata buyuk olabilir, daha sonra bir olcum daha alin.")
+        else if (fix.errorKm68 > 100) sb.append("\nGeometri zayif: farkli saatte bir olcum daha alin.")
+        if (note.isNotEmpty()) sb.append("\n").append(note)
+        return sb.toString()
+    }
+
+    private fun onSunFrame(
+        det: SunDetection, w: Int, h: Int, up: DoubleArray?, spreadDeg: Float?, rotDeg: Int,
+        epochMs: Long, compassAz: Float
+    ) {
+        setProcessingState(false)
+        resetCameraSession()
+        if (!det.ok) { resultTextView.text = "Gunes olcumu basarisiz: ${det.reason}"; return }
+        if (up == null) { resultTextView.text = "Egim sensoru yetersiz; telefonu sabit tutup tekrar deneyin"; return }
+        val fPx = (maxOf(w, h) / 2.0) / Math.tan(Math.toRadians(horizontalFov / 2.0))
+        val dx = det.x - (w - 1) / 2.0
+        val dy = det.y - (h - 1) / 2.0
+        val vx = dx / fPx; val vy = dy / fPx
+        val nrm = Math.sqrt(vx * vx + vy * vy + 1.0)
+        val offDeg = Math.toDegrees(Math.atan(Math.hypot(dx, dy) / fPx))
+        val calibrated = tiltCalibration.isCalibrated(rotDeg)
+        val upUsed = if (calibrated) tiltCalibration.correct(rotDeg, up) else up
+        val cosz = ((upUsed[0] * vx + upUsed[1] * vy + upUsed[2]) / nrm).coerceIn(-1.0, 1.0)
+        val zApp = Math.toDegrees(Math.acos(cosz))
+        if (90.0 - zApp < 8.0) {
+            resultTextView.text = "Gunes cok alcak (%.0f°): atmosfer kirilmasi hatayi buyutur. Daha yukselince olcun.".format(90.0 - zApp)
+            return
+        }
+        val dirHint = (if (dx > 0) "saga" else "sola") + " ve " + (if (dy > 0) "asagi" else "yukari")
+        if (offDeg > 8.0) {
+            resultTextView.text = "Gunes ekranin ortasindan cok uzak (%.0f°): telefonu %s cevirip ortalayin, sonra tekrar olcun.".format(offDeg, dirHint)
+            return
+        }
+        val zTrue = SunEphemeris.trueZenithDistanceDeg(zApp)
+        val sysSigma = if (calibrated) {
+            val r = tiltCalibration.residualDeg(rotDeg).let { if (it.isNaN()) 0.1 else it }
+            Math.sqrt(0.05 * 0.05 + r * r / tiltCalibration.frameCount(rotDeg))
+        } else 0.3
+        val spread = (spreadDeg ?: 0.3f).toDouble()
+        val sigma = Math.sqrt(sysSigma * sysSigma + spread * spread + (0.03 * offDeg) * (0.03 * offDeg) + 0.03 * 0.03)
+        sunSightings.add(SunSighting(epochMs, zTrue, sigma, compassAz.toDouble()))
+        saveSunSightings()
+        val note = (if (calibrated) "Sensor kalibreli." else "Sensor KALIBRE DEGIL (KALIBRE ET ile hata kucult).") +
+            (if (offDeg > 3.0) " Gunes ortada degildi (%.1f°): bir sonrakinde %s cevirip ortalayin.".format(offDeg, dirHint) else "")
+        resultTextView.text = sunResultText(note)
+        infoTextView.text = String.format(Locale.US, "Gunes: yukseklik %.2f° | merkezden %.1f° | belirsizlik ±%.2f° | titreme ±%.2f°", 90.0 - zApp, offDeg, sigma, spread)
     }
 
     private fun saveTiltCalibration() {
@@ -657,7 +797,7 @@ class MainActivity : AppCompatActivity() {
                 "3) Telefonu sabit tutun (tripod ya da bir yere dayayin).\n" +
                 "4) Uygulama 12 kare ceker: her karede telefonu ayni egimle yana ~90° cevirin. Erken bitirmek icin BITIR.\n" +
                 "5) Sonuc ekranin altinda gorunur. Telefon saati otomatik (ag) olmali.\n\n" +
-                "Ince ayarlar 'Gelismis ayarlar' altindadir."
+                "GUNDUZ icin MOD tusuna dokunun: Gunese dogrultup (ortada olsun) en az 2 olcum alin, aralarinda 1-3 saat olsun.\n\nInce ayarlar 'Gelismis ayarlar' altindadir."
             )
             .setPositiveButton("Anladim") { _, _ -> prefs.edit().putBoolean("howto_seen", true).apply() }
             .show()
@@ -678,7 +818,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         setProcessingState(true)
-        val opts = nightOptions
+        val opts = if (dayMode) sunOptions else nightOptions
         val cam = camera
         if (opts != null && cam != null) {
             try {
@@ -701,7 +841,8 @@ class MainActivity : AppCompatActivity() {
                     // Sensor penceresi cekim anina ait: once (ana is parcacigi) hesaplanir.
                     // Pozlama penceresi (sensor zaman tabaninda) + ortasindaki gercek saat; yoksa son 1-3 sn ve "simdi".
                     val nowNs = android.os.SystemClock.elapsedRealtimeNanos()
-                    val expNs = nightExposureNs
+                    val dayCapture = dayMode
+                    val expNs = if (dayCapture) sunExposureNs else nightExposureNs
                     val startNs = image.imageInfo.timestamp
                     val timestampOk = expNs > 0L && cameraTimestampRealtime && nowNs - startNs in 0L..30_000_000_000L
                     var tilt: CameraTilt?
@@ -736,6 +877,12 @@ class MainActivity : AppCompatActivity() {
                         try {
                             val rawBitmap = imageToBitmap(image)
                             val bitmap = rotateBitmap(rawBitmap, image.imageInfo.rotationDegrees)
+                            if (dayCapture) {
+                                val det = SunDetector.detect(bitmap)
+                                val bw = bitmap.width; val bh = bitmap.height
+                                runOnUiThread { onSunFrame(det, bw, bh, upMeasured, tiltSpread, captureRotationDeg, captureEpochMs, compass.getAzimuth()) }
+                                return@execute
+                            }
                             runOnUiThread {
                                 setSelectedPhoto(
                                     bitmap = bitmap,
@@ -984,6 +1131,7 @@ class MainActivity : AppCompatActivity() {
 
     /** CEK / otomatik cekim girisi: seri mod aciksa 12 kare (4 yon), degilse tek kare. */
     private fun startCaptureSequence() {
+        if (dayMode) { burstActive = false; takePhotoForSelection(); return }
         if (burstActive) { requestFinishBurst(); return }
         if (::burstSwitch.isInitialized && burstSwitch.isChecked && zenithLocator != null) {
             burstActive = true; burstWaiting = false; burstIndex = 0; burstFrames.clear()

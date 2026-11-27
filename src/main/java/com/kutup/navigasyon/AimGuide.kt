@@ -39,7 +39,20 @@ class AimGuide(
         private set
 
     /** Uzun kenar gorus acisina (derece) gore hedef araligi ayarlar. */
+    private var lastFov = 70f
+    var sunMode = false
+        private set
+
+    /** Gunduz (Gunes) modu: yukseklik 8-88 arasi, roll onemsiz (egim vektoru tam kullanilir). */
+    fun setSunMode(on: Boolean) {
+        sunMode = on
+        reset()
+        if (on) { minPitchDeg = 8f; maxPitchDeg = 88f } else setFov(lastFov)
+    }
+
     fun setFov(longSideFovDeg: Float) {
+        lastFov = longSideFovDeg
+        if (sunMode) return
         val lo = (longSideFovDeg / 2f + EDGE_MARGIN_DEG).coerceIn(45f, 65f)
         minPitchDeg = lo
         maxPitchDeg = 85f
@@ -58,7 +71,7 @@ class AimGuide(
             return AimState(0f, 0f, false, false, false, 0f, false, "Sensorler hazirlaniyor… telefonu yavasca tutun")
         }
         val pitchOk = tilt.pitchDeg in minPitchDeg..maxPitchDeg
-        val rollOk = abs(tilt.rollDeg) <= rollTolDeg
+        val rollOk = sunMode || abs(tilt.rollDeg) <= rollTolDeg
         val steadyOk = tilt.spreadDeg <= steadySpreadDeg
         val allOk = pitchOk && rollOk && steadyOk
         if (allOk) {
@@ -70,7 +83,12 @@ class AimGuide(
         }
         val progress = if (okSinceMs < 0) 0f else ((nowMs - okSinceMs).toFloat() / holdMs).coerceIn(0f, 1f)
         val ready = allOk && progress >= 1f
-        val message = when {
+        val message = if (sunMode) when {
+            tilt.pitchDeg < minPitchDeg -> "Gunes cok alcak (ufka yakin): kirilma hatasi buyur, daha yuksekken olcun"
+            !steadyOk -> "Titriyor: sabitleyin (tripod veya bir yere dayayin)"
+            !ready -> "Telefonu Gunese dogrultun, Gunes ekranin ORTASINDA olsun; sabit tutun…"
+            else -> "Hazir! Gunes ortadaysa cekin"
+        } else when {
             tilt.pitchDeg < minPitchDeg -> "Telefonu gokyuzune dogru kaldirin (%d° - %d° arasi)".format(minPitchDeg.toInt(), maxPitchDeg.toInt())
             tilt.pitchDeg > maxPitchDeg -> "Biraz asagi indirin (%d° - %d° arasi)".format(minPitchDeg.toInt(), maxPitchDeg.toInt())
             !rollOk -> if (tilt.rollDeg > 0) "Telefonu sola yatirin: cizgiyi yatay yapin" else "Telefonu saga yatirin: cizgiyi yatay yapin"
